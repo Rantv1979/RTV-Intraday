@@ -3033,7 +3033,7 @@ if __name__ == "__main__":
         # Initialize the application
        data_manager, trader = initialize_application()
     
-    if data_manager is None or trader is None:
+if data_manager is None or trader is None:
         st.error("Failed to initialize application. Please refresh the page.")
         st.stop()
     
@@ -4146,3 +4146,4 @@ if __name__ == "__main__":
     
     
     
+
