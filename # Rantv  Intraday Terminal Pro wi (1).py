@@ -3936,41 +3936,7 @@ with col4:
                 st.write(f"**Weight:** {config['weight']}")
                 st.write("**Description:** Standard trading strategy")
 
-    # Tab 8: High Accuracy Scanner
-    with tabs[7]:
-        st.subheader("🎯 High Accuracy Scanner - All Stocks")
-        st.markdown(f"""
-        <div class="alert-success">
-            <strong>🔥 High Accuracy Strategies Enabled:</strong> 
-            Scanning <strong>{universe}</strong> with enhanced high-accuracy strategies including
-            Multi-Confirmation, Volume Breakouts, RSI Divergence, and MACD Trend Momentum.
-            These strategies focus on volume confirmation, multi-timeframe alignment, 
-            and divergence patterns for higher probability trades.
-        </div>
-        """, unsafe_allow_html=True)
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            high_acc_scan_btn = st.button("🚀 Scan High Accuracy", type="primary", width='stretch', key="high_acc_scan_btn")
-        with col2:
-            min_high_acc_confidence = st.slider("Min Confidence", 65, 85, 70, 5, key="high_acc_conf_slider")  # CHANGED: 70-90 → 65-85
-        with col3:
-            min_high_acc_score = st.slider("Min Score", 5, 8, 6, 1, key="high_acc_score_slider")  # CHANGED: 6-10 → 5-8
-        
-        if high_acc_scan_btn:
-            with st.spinner(f"Scanning {universe} with high-accuracy strategies..."):
-                high_acc_signals = trader.generate_quality_signals(
-                    universe, 
-                    max_scan=50 if universe == "All Stocks" else max_scan,
-                    min_confidence=min_high_acc_confidence/100.0,
-                    min_score=min_high_acc_score,
-                    use_high_accuracy=True
-                )
-            
-            if high_acc_signals:
-                st.success(f"🎯 Found {len(high_acc_signals)} high-confidence signals!")
-                
-                #     # Tab 8: High Accuracy Scanner
+      #     # Tab 8: High Accuracy Scanner
     with tabs[7]:
         st.subheader("🎯 High Accuracy Scanner - All Stocks")
         st.markdown(f"""
@@ -4092,6 +4058,7 @@ except Exception as e:
     st.info("Please refresh the page and try again")
     logger.error(f"Application crash: {e}")
     st.code(traceback.format_exc())
+
 
 
 
