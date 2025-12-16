@@ -3028,7 +3028,9 @@ def initialize_application():
         return None, None
 
 # MAIN APPLICATION
-try:
+   if __name__ == "__main__":
+       try:
+           # Initialize the application
     # Initialize the application
     data_manager, trader = initialize_application()
     
@@ -3753,7 +3755,7 @@ try:
                 else:
                     st.error(f"❌ {msg}")
                     
-            except Exception as e:
+                except Exception as e:
                 st.error(f"Trade execution failed: {str(e)}")
         
         # Show current positions
@@ -4140,6 +4142,7 @@ try:
                 st.error(f"Error loading chart: {str(e)}")
                 st.info("Note: Kite Connect requires proper authentication and API permissions.")
    
+
 
 
 
