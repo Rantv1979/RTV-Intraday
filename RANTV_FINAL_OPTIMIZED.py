@@ -675,10 +675,13 @@ class KiteTokenDatabase:
 kite_token_db = KiteTokenDatabase()
 
 # Kite Connect Manager Class - Enhanced with OAuth Flow
+
+import time
+
 class KiteConnectManager:
     def __init__(self, api_key, api_secret):
-        self.api_key = api_key
-        self.api_secret = api_secret
+        self.api_key = api_key or ""
+        self.api_secret = api_secret or ""
         self.kite = None
         self.kws = None
         self.access_token = None
@@ -686,77 +689,178 @@ class KiteConnectManager:
         self.tick_buffer = {}
         self.candle_store = {}
         self.ws_running = False
-        
-    def check_oauth_callback(self):
-        """Check for OAuth callback with request_token in URL"""
+
+        # Session guards
+        st.session_state.setdefault("kite_oauth_consumed", False)
+        st.session_state.setdefault("kite_oauth_consumed_at", 0.0)
+        st.session_state.setdefault("kite_oauth_in_progress", False)
+
+    # ---------- Query params compatibility helpers ----------
+    def _get_query_params(self) -> dict:
         try:
-            query_params = st.query_params
-            if "request_token" in query_params:
-                request_token = query_params.get("request_token")
-                if request_token and self.api_key and self.api_secret:
-                    return self.exchange_request_token(request_token)
+            # Newer Streamlit (>=1.39)
+            return dict(st.query_params)
+        except Exception:
+            try:
+                # Older Streamlit
+                return dict(st.experimental_get_query_params())
+            except Exception:
+                return {}
+
+    def _clear_query_params(self):
+        """Best-effort clearing of query params. Do all three, safely."""
+        # 1) New API (if available)
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+        # 2) Old API
+        try:
+            st.experimental_set_query_params()
+        except Exception:
+            pass
+        # 3) Extra guard: use JS to remove the query part in the URL bar (Streamlit Cloud friendly)
+        try:
+            st.markdown(
+                """
+                <script>
+                if (window && window.history && window.location && window.location.pathname) {
+                    const cleanUrl = window.location.origin + window.location.pathname;
+                    window.history.replaceState({}, document.title, cleanUrl);
+                }
+                </script>
+                """,
+                unsafe_allow_html=True
+            )
+        except Exception:
+            pass
+
+    # ---------- OAuth handling ----------
+    def check_oauth_callback(self) -> bool:
+        """
+        If the URL contains a request_token and we haven't consumed it this session,
+        exchange it for an access token. Add safety to avoid loops on Cloud.
+        """
+        try:
+            q = self._get_query_params()
+            req = None
+            if "request_token" in q:
+                val = q.get("request_token")
+                req = val[0] if isinstance(val, list) else val
+
+            # Nothing to do
+            if not req:
+                return False
+
+            # If we just consumed a token very recently, ignore (break loops)
+            if st.session_state.kite_oauth_consumed and (time.time() - st.session_state.kite_oauth_consumed_at) < 60:
+                # Clear params if the browser still shows request_token
+                self._clear_query_params()
+                return False
+
+            # Exchange now
+            return self.exchange_request_token(req)
         except Exception as e:
             logger.error(f"OAuth callback error: {e}")
-        return False
-    
-    def exchange_request_token(self, request_token):
-        """Exchange request_token for access_token"""
+            return False
+
+    def exchange_request_token(self, request_token: str) -> bool:
+        """
+        Exchange request_token -> access_token, clear URL BEFORE any rerun,
+        and mark as consumed to avoid re-entry.
+        """
         try:
+            if not self.api_key or not self.api_secret:
+                st.error("Kite API credentials missing.")
+                return False
+
             if not self.kite:
                 self.kite = KiteConnect(api_key=self.api_key)
-            
+
+            # Mark that we are in OAuth flow to avoid other UI code running this tick
+            st.session_state.kite_oauth_in_progress = True
+
             data = self.kite.generate_session(request_token, api_secret=self.api_secret)
-            
-            if data and "access_token" in data:
-                self.access_token = data["access_token"]
-                self.kite.set_access_token(self.access_token)
-                self.is_authenticated = True
-                
-                st.session_state.kite_access_token = self.access_token
-                st.session_state.kite_user_name = data.get("user_name", "")
-                
+            if not data or "access_token" not in data:
+                st.error("Kite token exchange failed (no access token).")
+                # Clear params anyway to avoid loop
+                self._clear_query_params()
+                st.session_state.kite_oauth_in_progress = False
+                return False
+
+            self.access_token = data["access_token"]
+            self.kite.set_access_token(self.access_token)
+            self.is_authenticated = True
+
+            # Persist to session
+            st.session_state.kite_access_token = self.access_token
+            st.session_state.kite_user_name = data.get("user_name", "")
+
+            # Persist to DB if available
+            try:
                 kite_token_db.save_token(
                     access_token=self.access_token,
                     user_name=data.get("user_name", ""),
                     public_token=data.get("public_token", ""),
                     refresh_token=data.get("refresh_token", "")
                 )
-                
-                st.query_params.clear()
-                return True
+            except Exception as db_e:
+                logger.warning(f"Kite token DB save warning: {db_e}")
+
+            # Mark consumed and timestamp
+            st.session_state.kite_oauth_consumed = True
+            st.session_state.kite_oauth_consumed_at = time.time()
+
+            # CRITICAL: Clear the query params BEFORE any rerun / further UI
+            self._clear_query_params()
+
+            # Give the browser a beat to replace URL (helps on Cloud)
+            st.toast("✅ Authenticated with Kite. Finalizing...", icon="✅")
+            time.sleep(0.3)
+
+            # Stop other parts of the page from running in this cycle
+            st.session_state.kite_oauth_in_progress = False
+            st.rerun()
+            return True
+
         except Exception as e:
             logger.error(f"Token exchange error: {e}")
+            # Try to clear params to break potential loop
+            self._clear_query_params()
+            st.session_state.kite_oauth_in_progress = False
             st.error(f"Token exchange failed: {str(e)}")
-        return False
+            return False
 
-    def login(self):
-        """Login to Kite Connect with enhanced OAuth flow"""
+    def login(self) -> bool:
+        """
+        Render the login UI, but avoid double-running if we are in the middle of
+        an OAuth round-trip.
+        """
         try:
-            if not self.api_key:
-                st.warning("Kite API Key not configured. Set KITE_API_KEY and KITE_API_SECRET in environment secrets for live trading features.")
+            if not self.api_key or not self.api_secret:
+                st.warning("Kite API Key not configured. Set KITE_API_KEY and KITE_API_SECRET in environment secrets.")
                 return False
-            
-            self.kite = KiteConnect(api_key=self.api_key)
-            
-            # Check for OAuth callback
-            if self.check_oauth_callback():
-                st.success("Successfully authenticated with Kite Connect!")
-                st.rerun()
+
+            if not self.kite:
+                self.kite = KiteConnect(api_key=self.api_key)
+
+            # 1) Handle OAuth callback first
+            if not st.session_state.kite_oauth_in_progress and self.check_oauth_callback():
                 return True
-            
-            # Check session state
+
+            # 2) Session token check
             if "kite_access_token" in st.session_state:
                 self.access_token = st.session_state.kite_access_token
                 self.kite.set_access_token(self.access_token)
                 try:
-                    profile = self.kite.profile()
+                    _ = self.kite.profile()
                     self.is_authenticated = True
                     return True
-                except:
-                    del st.session_state.kite_access_token
-            
-            # Check database for valid token
-            db_token = kite_token_db.get_valid_token()
+                except Exception:
+                    del st.session_state["kite_access_token"]
+
+            # 3) DB token fallback
+            db_token = kite_token_db.get_valid_token() if kite_token_db else None
             if db_token:
                 self.access_token = db_token["access_token"]
                 self.kite.set_access_token(self.access_token)
@@ -766,50 +870,73 @@ class KiteConnectManager:
                     st.session_state.kite_access_token = self.access_token
                     st.session_state.kite_user_name = profile.get("user_name", "")
                     return True
-                except:
-                    kite_token_db.invalidate_token()
-            
-            # Show login options
-            st.info("Kite Connect authentication required for live trading features.")
-            
+                except Exception:
+                    try:
+                        kite_token_db.invalidate_token()
+                    except Exception:
+                        pass
+
+            # 4) Render login UI (only if not mid-flow)
+            if st.session_state.kite_oauth_in_progress:
+                st.info("Completing authentication…")
+                return False
+
+            st.info("Kite Connect authentication required for live charts.")
             login_url = self.kite.login_url()
-            st.markdown(f"""
-            <div style="background: linear-gradient(135deg, #1e3a8a 0%, #3730a3 100%); padding: 20px; border-radius: 10px; text-align: center; margin: 10px 0;">
-                <h3 style="color: white; margin-bottom: 15px;">Connect to Zerodha Kite</h3>
-                <a href="{login_url}" target="_self" style="display: inline-block; background: #f59e0b; color: white; padding: 12px 30px; border-radius: 8px; text-decoration: none; font-weight: bold;">
-                    Login with Kite
-                </a>
-                <p style="color: #e0f2fe; margin-top: 15px; font-size: 12px;">You will be redirected to Zerodha for authentication</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
+
+            # NOTE: Using a simple link is less brittle on Cloud
+            st.link_button("🔐 Login with Kite", login_url, use_container_width=True)
+
             st.markdown("**Or enter access token manually:**")
-            
             with st.form("kite_login_form"):
                 access_token = st.text_input("Access Token", type="password", help="Paste your access token from Kite Connect")
                 submit = st.form_submit_button("Authenticate", type="primary")
-                
-                if submit and access_token:
+
+            if submit and access_token:
+                try:
+                    self.access_token = access_token
+                    self.kite.set_access_token(self.access_token)
+                    profile = self.kite.profile()
+                    user_name = profile.get("user_name", "")
+                    st.session_state.kite_access_token = self.access_token
+                    st.session_state.kite_user_name = user_name
                     try:
-                        self.access_token = access_token
-                        self.kite.set_access_token(self.access_token)
-                        profile = self.kite.profile()
-                        user_name = profile.get("user_name", "")
-                        st.session_state.kite_access_token = self.access_token
-                        st.session_state.kite_user_name = user_name
                         kite_token_db.save_token(access_token=self.access_token, user_name=user_name)
-                        self.is_authenticated = True
-                        st.success(f"Authenticated as {user_name}")
-                        return True
-                    except Exception as e:
-                        st.error(f"Authentication failed: {str(e)}")
-                        return False
+                    except Exception:
+                        pass
+                    self.is_authenticated = True
+                    st.success(f"Authenticated as {user_name}")
+                    return True
+                except Exception as e:
+                    st.error(f"Authentication failed: {str(e)}")
+                    return False
+
             return False
-            
+
         except Exception as e:
             st.error(f"Kite Connect login error: {str(e)}")
             return False
-    
+
+    def logout(self):
+        try:
+            if "kite_access_token" in st.session_state:
+                del st.session_state.kite_access_token
+            if "kite_user_name" in st.session_state:
+                del st.session_state.kite_user_name
+            st.session_state.kite_oauth_consumed = False
+            st.session_state.kite_oauth_consumed_at = 0.0
+            st.session_state.kite_oauth_in_progress = False
+            try:
+                kite_token_db.invalidate_token()
+            except Exception:
+                pass
+            self.access_token = None
+            self.is_authenticated = False
+            return True
+        except Exception as e:
+            logger.error(f"Logout error: {e}")
+            return False
+``
     def logout(self):
         """Logout from Kite Connect"""
         try:
