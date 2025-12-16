@@ -3780,48 +3780,55 @@ try:
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
-                
-               # Quick execution buttons for high accuracy signals - FIXED DUPLICATE KEY ERROR
-st.subheader("Quick Execution")
-exec_cols = st.columns(3)
-for idx, signal in enumerate(high_acc_signals[:6]):  # Show first 6
-    with exec_cols[idx % 3]:
-        # Create truly unique key with random component
-        import uuid
-        unique_key = f"high_acc_exec_{signal['symbol']}_{idx}_{str(uuid.uuid4())[:8]}"
-        if st.button(
-            f"{signal['action']} {signal['symbol'].replace('.NS', '')}", 
-            key=unique_key,
-            width='stretch'
-        ):
-            if kelly_sizing:
-                qty = trader.data_manager.calculate_optimal_position_size(
-                    signal["symbol"], signal["win_probability"], signal["risk_reward"], 
-                    trader.cash, signal["entry"], 
-                    trader.data_manager.get_stock_data(signal["symbol"], "15m")["ATR"].iloc[-1]
-                )
-            else:
-                qty = int((trader.cash * TRADE_ALLOC) / signal["entry"])
-            
-            success, msg = trader.execute_trade(
-                symbol=signal["symbol"],
-                action=signal["action"],
-                quantity=qty,
-                price=signal["entry"],
-                stop_loss=signal["stop_loss"],
-                target=signal["target"],
-                win_probability=signal.get("win_probability", 0.75),
-                strategy=signal.get("strategy")
-            )
-            if success:
-                st.success(msg)
-                st.rerun()
+
+            # Quick execution buttons for high accuracy signals
+            if "high_acc_signals" in locals() and high_acc_signals:
+                st.subheader("Quick Execution")
+                exec_cols = st.columns(3)
+                for idx, signal in enumerate(high_acc_signals[:6]):  # Show first 6
+                    with exec_cols[idx % 3]:
+                        import uuid
+                        unique_key = f"high_acc_exec_{signal['symbol']}_{idx}_{str(uuid.uuid4())[:8]}"
+                        if st.button(
+                            f"{signal['action']} {signal['symbol'].replace('.NS', '')}",
+                            key=unique_key,
+                            use_container_width=True
+                        ):
+                            if kelly_sizing:
+                                # Safe ATR fetch; fallback to 1% of price
+                                try:
+                                    data15 = trader.data_manager.get_stock_data(signal["symbol"], "15m")
+                                    atr_val = data15["ATR"].iloc[-1] if "ATR" in data15.columns else signal["entry"] * 0.01
+                                except Exception:
+                                    atr_val = signal["entry"] * 0.01
+                                qty = trader.data_manager.calculate_optimal_position_size(
+                                    signal["symbol"], signal.get("win_probability", 0.75), signal.get("risk_reward", 2.0),
+                                    trader.cash, signal["entry"], atr_val
+                                )
+                            else:
+                                qty = int((trader.cash * TRADE_ALLOC) / signal["entry"])  # Fallback sizing
+
+                            success, msg = trader.execute_trade(
+                                symbol=signal["symbol"],
+                                action=signal["action"],
+                                quantity=qty,
+                                price=signal["entry"],
+                                stop_loss=signal.get("stop_loss"),
+                                target=signal.get("target"),
+                                win_probability=signal.get("win_probability", 0.75),
+                                strategy=signal.get("strategy")
+                            )
+                            if success:
+                                st.success(msg)
+                                st.rerun()
+    
+
 
     # Tab 9: Kite Live Charts (NEW TAB)
     with tabs[8]:
-    create_kite_live_charts_tab(data_manager)
-st.markdown("---")
-    st.markdown("<div style='text-align:center; color: #6b7280;'>Enhanced Intraday Terminal Pro with Full Stock Scanning & High-Quality Signal Filters | Reduced Losses & Improved Profitability | Integrated with Kite Connect</div>", unsafe_allow_html=True)
+        create_kite_live_charts_tab(data_manager)
+        st.markdown("---")
+        st.markdown("<div style='text-align:center; color: #6b7280;'>Enhanced Intraday Terminal Pro with Full Stock Scanning & High-Quality Signal Filters | Reduced Losses & Improved Profitability | Integrated with Kite Connect</div>", unsafe_allow_html=True)
 
 except Exception as e:
     st.error(f"Application error: {str(e)}")
@@ -3965,6 +3972,7 @@ class KiteConnectManagerLive:
         return pd.DataFrame(rows, index=idx)
 
 # Tick-only tab
+
 def create_kite_live_charts_tab(data_manager):
     st.subheader("📈 Kite Connect Live Charts (Tick → 1‑Min Candles)")
 
@@ -3985,7 +3993,7 @@ def create_kite_live_charts_tab(data_manager):
 
     left, right = st.columns([3, 1])
     with left:
-        selected_index = st.selectbox("Select Index", list(INDEX_TOKENS.keys()), key="kite_live_index_v3")
+        selected_index = st.selectbox("Select Index", list(INDEX_TOKENS.keys()), key="kite_live_index_v4")
     with right:
         max_bars = st.number_input("Bars", min_value=30, max_value=240, value=120, step=10)
 
@@ -3993,27 +4001,27 @@ def create_kite_live_charts_tab(data_manager):
     start_clicked = c1.button("▶️ Start Live", type="primary", use_container_width=True)
     stop_clicked = c2.button("⏹ Stop", type="secondary", use_container_width=True)
 
-    if "kite_live_state_v3" not in st.session_state:
-        st.session_state.kite_live_state_v3 = {"active": False, "token": None, "index": None}
+    if "kite_live_state_v4" not in st.session_state:
+        st.session_state.kite_live_state_v4 = {"active": False, "token": None, "index": None}
 
     token = INDEX_TOKENS[selected_index]
 
     if start_clicked:
         ok = km.start_websocket([token])
         if ok:
-            st.session_state.kite_live_state_v3 = {"active": True, "token": token, "index": selected_index}
+            st.session_state.kite_live_state_v4 = {"active": True, "token": token, "index": selected_index}
             st.success(f"✅ Live started for {selected_index}")
         else:
             st.error("Failed to start WebSocket. Check Kite access token / permissions.")
 
     if stop_clicked:
         km.stop_websocket()
-        st.session_state.kite_live_state_v3 = {"active": False, "token": None, "index": None}
+        st.session_state.kite_live_state_v4 = {"active": False, "token": None, "index": None}
         st.info("Stopped live streaming")
 
-    live = st.session_state.kite_live_state_v3
+    live = st.session_state.kite_live_state_v4
     if live["active"] and live["token"] == token:
-        st_autorefresh(interval=5000, key="kite_live_refresh_v3", limit=None)
+        st_autorefresh(interval=5000, key="kite_live_refresh_v4", limit=None)
         df = km.get_candle_df(token, lookback=max_bars)
         if df.empty:
             st.info("Waiting for ticks to build first candle...")
