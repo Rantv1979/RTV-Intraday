@@ -1,4 +1,4 @@
-Rantv Intraday Trading Signals & Market Analysis - PRODUCTION READY
+# Rantv Intraday Trading Signals & Market Analysis - PRODUCTION READY
 # ENHANCED VERSION WITH FULL STOCK SCANNING & BETTER SIGNAL QUALITY
 # UPDATED: Lowered confidence to 70%, score to 6, added ADX trend filter, optimized for peak hours
 # INTEGRATED WITH KITE CONNECT FOR LIVE CHARTS
@@ -5060,3 +5060,12 @@ try:
         with today_cols[3]:
             signals_today = len(trader.signal_history)
             st.metric("Signals Generated", signals_today)
+
+    st.markdown("---")
+    st.markdown("<div style='text-align:center; color: #6b7280;'>Enhanced Intraday Terminal Pro with Full Stock Scanning & High-Quality Signal Filters | Reduced Losses & Improved Profitability | Integrated with Kite Connect</div>", unsafe_allow_html=True)
+
+except Exception as e:
+    st.error(f"Application error: {str(e)}")
+    st.info("Please refresh the page and try again")
+    logger.error(f"Application crash: {e}")
+    st.code(traceback.format_exc())
