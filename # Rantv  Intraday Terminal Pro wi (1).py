@@ -4036,8 +4036,7 @@ try:
                                 st.success(msg)
                                 st.rerun()
 
-
-   # Tab 9: Kite Live Charts (NEW TAB)
+# Tab 9: Kite Live Charts (NEW TAB)
     with tabs[8]:
         st.subheader("📈 Kite Connect Live Charts")
         
@@ -4140,4 +4139,6 @@ try:
             except Exception as e:
                 st.error(f"Error loading chart: {str(e)}")
                 st.info("Note: Kite Connect requires proper authentication and API permissions.")
+   
+
 
