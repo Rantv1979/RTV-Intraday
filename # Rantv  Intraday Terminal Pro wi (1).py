@@ -3818,7 +3818,7 @@ for idx, signal in enumerate(high_acc_signals[:6]):  # Show first 6
 
     # Tab 9: Kite Live Charts (NEW TAB)
     with tabs[8]:
-        create_kite_live_charts()
+    create_kite_live_charts_tab(data_manager)
 
     st.markdown("---")
     st.markdown("<div style='text-align:center; color: #6b7280;'>Enhanced Intraday Terminal Pro with Full Stock Scanning & High-Quality Signal Filters | Reduced Losses & Improved Profitability | Integrated with Kite Connect</div>", unsafe_allow_html=True)
@@ -3831,100 +3831,206 @@ except Exception as e:
 
 
 
-# --- NEW KITE LIVE CHARTS IMPLEMENTATION ---
-
-# ================= RANTV KITE LIVE CHARTS – FINAL PATCH =================
-# Includes:
-# - Kite authentication
-# - Index + Top 10 signals live charts
-# - Tick-based candle building (WebSocket)
-# - Auto refresh every 5 seconds
-# - Plotly TradingView-style charts
-# ======================================================================
-
-import streamlit as st
-import pandas as pd
+# ===================== TICK-BASED KITE LIVE CHARTS (NO HISTORICAL) =====================
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-from kiteconnect import KiteConnect, KiteTicker
-import pytz
-import threading
+from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
-IND_TZ = pytz.timezone("Asia/Kolkata")
+try:
+    from kiteconnect import KiteConnect, KiteTicker
+except Exception:
+    KiteConnect = None
+    KiteTicker = None
 
-# ---------------- KITE CONFIG ----------------
-KITE_API_KEY = "PUT_YOUR_KEY"
-ACCESS_TOKEN = "PUT_YOUR_ACCESS_TOKEN"
+# Live-only manager: builds 1-min candles from ticks
+class KiteConnectManagerLive:
+    def __init__(self, api_key, api_secret):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.kite = None
+        self.kws = None
+        self.access_token = None
+        self.is_authenticated = False
+        self.candle_store = {}
+        self.ws_running = False
+        self.subscribed_tokens = set()
 
-kite = KiteConnect(api_key=KITE_API_KEY)
-kite.set_access_token(ACCESS_TOKEN)
+    def login(self):
+        if KiteConnect is None:
+            st.error("kiteconnect not installed. Install: pip install kiteconnect")
+            return False
+        try:
+            self.kite = KiteConnect(api_key=self.api_key)
+            if "kite_access_token" in st.session_state:
+                self.access_token = st.session_state.kite_access_token
+                self.kite.set_access_token(self.access_token)
+                self.is_authenticated = True
+                return True
+            st.warning("Kite Connect authentication required.")
+            login_url = self.kite.login_url()
+            st.markdown(f'<a href="{login_url}" target="_blank">🔐 Login to Kite Connect</a>', unsafe_allow_html=True)
+            with st.form("kite_login_form_live"):
+                st.write("**Paste the Access Token (post-login)**")
+                token = st.text_input("Access Token", type="password")
+                ok = st.form_submit_button("Authenticate")
+            if ok and token:
+                try:
+                    self.access_token = token
+                    self.kite.set_access_token(self.access_token)
+                    _ = self.kite.profile()
+                    st.session_state.kite_access_token = self.access_token
+                    self.is_authenticated = True
+                    st.success("✅ Authenticated with Kite Connect")
+                    return True
+                except Exception as e:
+                    st.error(f"Authentication failed: {e}")
+                    return False
+            return False
+        except Exception as e:
+            st.error(f"Kite Connect login error: {e}")
+            return False
 
-# ---------------- INDEX SYMBOLS ----------------
-INDEX_SYMBOLS = {
-    "NIFTY 50": "NSE:NIFTY 50",
-    "BANKNIFTY": "NSE:NIFTY BANK",
-    "FINNIFTY": "NSE:NIFTY FIN SERVICE"
-}
+    def _floor_min(self, dt):
+        return dt.replace(second=0, microsecond=0)
 
-# ---------------- CANDLE BUILDER ----------------
-tick_buffer = {}
-candle_store = {}
+    def on_ticks(self, ws, ticks):
+        ts_min = self._floor_min(datetime.now(IND_TZ))
+        for t in ticks:
+            token = t.get("instrument_token")
+            ltp = t.get("last_price")
+            if token is None or ltp is None:
+                continue
+            token_map = self.candle_store.setdefault(token, {})
+            if ts_min not in token_map:
+                token_map[ts_min] = {"open": ltp, "high": ltp, "low": ltp, "close": ltp}
+            else:
+                c = token_map[ts_min]
+                c["high"] = max(c["high"], ltp)
+                c["low"] = min(c["low"], ltp)
+                c["close"] = ltp
+            if len(token_map) > 130:
+                for old_key in sorted(token_map.keys())[:-120]:
+                    token_map.pop(old_key, None)
 
-def on_ticks(ws, ticks):
-    for t in ticks:
-        token = t["instrument_token"]
-        ltp = t["last_price"]
-        ts = datetime.now(IND_TZ).replace(second=0, microsecond=0)
+    def _on_connect(self, ws, resp):
+        if self.subscribed_tokens:
+            try:
+                ws.subscribe(list(self.subscribed_tokens))
+            except Exception:
+                pass
 
-        candle = candle_store.get(token, {
-            "open": ltp, "high": ltp, "low": ltp, "close": ltp
-        })
+    def start_websocket(self, tokens):
+        if KiteTicker is None:
+            st.error("kiteconnect not installed. Install: pip install kiteconnect")
+            return False
+        if not self.is_authenticated:
+            return False
+        try:
+            if self.kws is None:
+                self.kws = KiteTicker(self.api_key, self.access_token)
+                self.kws.on_ticks = self.on_ticks
+                self.kws.on_connect = self._on_connect
+                self.kws.connect(threaded=True)
+                self.ws_running = True
+            for t in tokens:
+                if t not in self.subscribed_tokens:
+                    self.subscribed_tokens.add(t)
+            try:
+                if self.kws:
+                    self.kws.subscribe(tokens)
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            logger.error(f"WebSocket start error: {e}")
+            return False
 
-        candle["high"] = max(candle["high"], ltp)
-        candle["low"] = min(candle["low"], ltp)
-        candle["close"] = ltp
+    def stop_websocket(self):
+        try:
+            if self.kws:
+                self.kws.close()
+            self.kws = None
+            self.ws_running = False
+            self.subscribed_tokens.clear()
+        except Exception:
+            pass
 
-        candle_store[token] = candle
+    def get_candle_df(self, token, lookback=120):
+        d = self.candle_store.get(token, {})
+        if not d:
+            return pd.DataFrame(columns=["open", "high", "low", "close"])
+        items = sorted(d.items(), key=lambda kv: kv[0])[-lookback:]
+        idx = [k for k, _ in items]
+        rows = [v for _, v in items]
+        return pd.DataFrame(rows, index=idx)
 
-def start_ws(tokens):
-    kws = KiteTicker(KITE_API_KEY, ACCESS_TOKEN)
-    kws.on_ticks = on_ticks
-    kws.on_connect = lambda ws, resp: ws.subscribe(tokens)
-    kws.connect(threaded=True)
+# Tick-based tab (no historical)
+def create_kite_live_charts_tab(data_manager):
+    st.subheader("📈 Kite Connect Live Charts (Tick → 1‑Min Candles)")
 
-# ---------------- STREAMLIT UI ----------------
-st.set_page_config("RANTV – Kite Live Charts", layout="wide")
-st.title("📈 RANTV Kite Live Charts (Tick-Based)")
+    # Dedicated live manager to avoid side effects on other parts of the app
+    if "kite_manager_live" not in st.session_state:
+        st.session_state.kite_manager_live = KiteConnectManagerLive(KITE_API_KEY, KITE_API_SECRET)
+    km = st.session_state.kite_manager_live
 
-index = st.selectbox("Select Index", list(INDEX_SYMBOLS.keys()))
-symbol = INDEX_SYMBOLS[index]
+    if not km.is_authenticated:
+        if km.login():
+            st.rerun()
+        return
 
-if st.button("Start Live Chart"):
-    token = kite.ltp(symbol)[symbol]["instrument_token"]
-    start_ws([token])
+    INDEX_TOKENS = {
+        "NIFTY 50": 256265,
+        "BANKNIFTY": 260105,
+        "FINNIFTY": 257801,
+    }
 
-    placeholder = st.empty()
+    left, right = st.columns([3, 1])
+    with left:
+        selected_index = st.selectbox("Select Index", list(INDEX_TOKENS.keys()), key="kite_live_index_v2")
+    with right:
+        max_bars = st.number_input("Bars", min_value=30, max_value=240, value=120, step=10)
 
-    while True:
-        candle = candle_store.get(token)
-        if candle:
-            df = pd.DataFrame([candle])
+    c1, c2, _ = st.columns([1, 1, 6])
+    start_clicked = c1.button("▶️ Start Live", type="primary", use_container_width=True)
+    stop_clicked = c2.button("⏹ Stop", type="secondary", use_container_width=True)
 
-            fig = go.Figure()
-            fig.add_candlestick(
-                x=[datetime.now()],
-                open=df["open"],
-                high=df["high"],
-                low=df["low"],
-                close=df["close"]
-            )
+    if "kite_live_state_v2" not in st.session_state:
+        st.session_state.kite_live_state_v2 = {"active": False, "token": None, "index": None}
 
-            fig.update_layout(
-                height=600,
-                xaxis_rangeslider_visible=False,
-                dragmode="pan"
-            )
+    token = INDEX_TOKENS[selected_index]
 
-            placeholder.plotly_chart(fig, use_container_width=True)
+    if start_clicked:
+        ok = km.start_websocket([token])
+        if ok:
+            st.session_state.kite_live_state_v2 = {"active": True, "token": token, "index": selected_index}
+            st.success(f"✅ Live started for {selected_index}")
+        else:
+            st.error("Failed to start WebSocket. Check Kite access token / permissions.")
 
-        st.sleep(5)
+    if stop_clicked:
+        km.stop_websocket()
+        st.session_state.kite_live_state_v2 = {"active": False, "token": None, "index": None}
+        st.info("Stopped live streaming")
+
+    live = st.session_state.kite_live_state_v2
+    if live["active"] and live["token"] == token:
+        st_autorefresh(interval=5000, key="kite_live_refresh_v2", limit=None)
+        df = km.get_candle_df(token, lookback=max_bars)
+        if df.empty:
+            st.info("Waiting for ticks to build first candle...")
+            return
+        fig = go.Figure()
+        fig.add_candlestick(x=df.index, open=df["open"], high=df["high"], low=df["low"], close=df["close"], name="Price")
+        fig.update_layout(height=560, title=f"{live['index']} – Live (1‑min)", xaxis_rangeslider_visible=False, template="plotly_dark")
+        st.plotly_chart(fig, use_container_width=True)
+
+        last = df.iloc[-1]
+        cols = st.columns(4)
+        cols[0].metric("Open", f"₹{last['open']:.2f}")
+        cols[1].metric("High", f"₹{last['high']:.2f}")
+        cols[2].metric("Low",  f"₹{last['low']:.2f}")
+        cols[3].metric("Close",f"₹{last['close']:.2f}")
+        st.caption(f"WebSocket: **{'Running' if km.ws_running else 'Stopped'}** · Subscribed tokens: {len(km.subscribed_tokens)}")
+    else:
+        st.info("Click **Start Live** to begin streaming 1‑minute candles.")
+# ========================================================================================
