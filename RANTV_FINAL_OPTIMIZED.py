@@ -5009,6 +5009,50 @@ try:
     # Tab 9: Kite Live Charts (NEW TAB)
     with tabs[8]:
         create_kite_live_charts()
+        
+# --- Diagnostic panel (helps confirm/clear state on Cloud) ---
+with st.expander("🛠 Kite OAuth Diagnostic", expanded=False):
+    q = {}
+    try:
+        # Show current query params
+        q = dict(st.query_params)
+    except Exception:
+        try:
+            q = dict(st.experimental_get_query_params())
+        except Exception:
+            q = {}
+
+    st.write("Query params detected:", q)
+    st.write("kite_oauth_consumed:", st.session_state.get("kite_oauth_consumed"))
+    st.write("kite_oauth_consumed_at:", st.session_state.get("kite_oauth_consumed_at"))
+    st.write("kite_oauth_in_progress:", st.session_state.get("kite_oauth_in_progress"))
+
+    if st.button("🔄 Reset OAuth State (clear params + state)"):
+        # Hard reset session & URL
+        st.session_state.kite_oauth_consumed = False
+        st.session_state.kite_oauth_consumed_at = 0.0
+        st.session_state.kite_oauth_in_progress = False
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+        try:
+            st.experimental_set_query_params()
+        except Exception:
+            pass
+        st.markdown(
+            """
+            <script>
+            if (window && window.history && window.location && window.location.pathname) {
+                const cleanUrl = window.location.origin + window.location.pathname;
+                window.history.replaceState({}, document.title, cleanUrl);
+            }
+            </script>
+            """,
+            unsafe_allow_html=True
+        )
+        st.success("OAuth state cleared. Please click Login again.")
+        st.rerun()
     
     # Tab 10: Portfolio Analytics Dashboard
     with tabs[9]:
