@@ -3970,8 +3970,42 @@ with col4:
             if high_acc_signals:
                 st.success(f"🎯 Found {len(high_acc_signals)} high-confidence signals!")
                 
+                #     # Tab 8: High Accuracy Scanner
+    with tabs[7]:
+        st.subheader("🎯 High Accuracy Scanner - All Stocks")
+        st.markdown(f"""
+        <div class="alert-success">
+            <strong>🔥 High Accuracy Strategies Enabled:</strong> 
+            Scanning <strong>{universe}</strong> with enhanced high-accuracy strategies including
+            Multi-Confirmation, Volume Breakouts, RSI Divergence, and MACD Trend Momentum.
+            These strategies focus on volume confirmation, multi-timeframe alignment, 
+            and divergence patterns for higher probability trades.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            high_acc_scan_btn = st.button("🚀 Scan High Accuracy", type="primary", width='stretch', key="high_acc_scan_btn")
+        with col2:
+            min_high_acc_confidence = st.slider("Min Confidence", 65, 85, 70, 5, key="high_acc_conf_slider")
+        with col3:
+            min_high_acc_score = st.slider("Min Score", 5, 8, 6, 1, key="high_acc_score_slider")
+        
+        if high_acc_scan_btn:
+            with st.spinner(f"Scanning {universe} with high-accuracy strategies..."):
+                high_acc_signals = trader.generate_quality_signals(
+                    universe, 
+                    max_scan=50 if universe == "All Stocks" else max_scan,
+                    min_confidence=min_high_acc_confidence/100.0,
+                    min_score=min_high_acc_score,
+                    use_high_accuracy=True
+                )
+            
+            if high_acc_signals:
+                st.success(f"🎯 Found {len(high_acc_signals)} high-confidence signals!")
+                
                 # Display high accuracy signals with special styling
-                for idx, signal in enumerate(high_acc_signals[:10]):  # Show first 10
+                for idx, signal in enumerate(high_acc_signals[:10]):
                     quality_score = signal.get('quality_score', 0)
                     if quality_score >= 80:
                         quality_class = "high-quality-signal"
@@ -4007,12 +4041,11 @@ with col4:
                         </div>
                         """, unsafe_allow_html=True)
                 
-                              # Quick execution buttons for high accuracy signals - FIXED DUPLICATE KEY ERROR
+                # Quick execution buttons for high accuracy signals
                 st.subheader("Quick Execution")
                 exec_cols = st.columns(3)
-                for idx, signal in enumerate(high_acc_signals[:6]):  # Show first 6
+                for idx, signal in enumerate(high_acc_signals[:6]):
                     with exec_cols[idx % 3]:
-                        # Create truly unique key with random component
                         import uuid
                         unique_key = f"high_acc_exec_{signal['symbol']}_{idx}_{str(uuid.uuid4())[:8]}"
                         if st.button(
@@ -4059,5 +4092,6 @@ except Exception as e:
     st.info("Please refresh the page and try again")
     logger.error(f"Application crash: {e}")
     st.code(traceback.format_exc())
+
 
 
