@@ -2748,9 +2748,235 @@ class MultiStrategyIntradayTrader:
         return executed
 
 # Enhanced Kite Live Charts Function
+def create_kite_live_charts():
+    """Create simplified Kite Connect Live Charts without complex WebSocket"""
+    st.subheader("📈 Kite Connect Live Charts")
+    
+    # Initialize Kite Connect
+    if "kite_manager" not in st.session_state:
+        st.session_state.kite_manager = KiteConnectManager(KITE_API_KEY, KITE_API_SECRET)
+    
+    kite_manager = st.session_state.kite_manager
+    
+    # Simple login
+    if not kite_manager.is_authenticated:
+        st.info("Kite Connect authentication required for live charts.")
+        if kite_manager.login():
+            st.rerun()
+        return
+    
+    # Simple chart selection
+    selected_index = st.selectbox("Select Index", ["NIFTY 50", "BANKNIFTY", "FINNIFTY"])
+    
+    # Simple date range
+    col1, col2 = st.columns(2)
+    with col1:
+        interval = st.selectbox("Interval", ["minute", "5minute", "15minute", "30minute", "hour"])
+    with col2:
+        days_back = st.slider("Days Back", 1, 30, 7)
+    
+    if st.button("Load Chart Data", type="primary"):
+        try:
+            # Map symbols to NSE tokens
+            token_map = {
+                "NIFTY 50": 256265,
+                "BANKNIFTY": 260105,
+                "FINNIFTY": 257801
+            }
+            
+            token = token_map.get(selected_index)
+            if token:
+                with st.spinner(f"Fetching data for {selected_index}..."):
+                    # Get data
+                    data = data_manager.get_kite_data(token, interval, days_back)
+                    
+                    if data is not None and len(data) > 0:
+                        # Create simple chart
+                        fig = go.Figure(data=[go.Candlestick(
+                            x=data.index,
+                            open=data['open'],
+                            high=data['high'],
+                            low=data['low'],
+                            close=data['close']
+                        )])
+                        
+                        fig.update_layout(
+                            title=f'{selected_index} Live Chart',
+                            xaxis_title='Time',
+                            yaxis_title='Price',
+                            height=500
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Show current stats
+                        current_price = data['close'].iloc[-1]
+                        prev_close = data['close'].iloc[-2] if len(data) > 1 else current_price
+                        change_pct = ((current_price - prev_close) / prev_close) * 100
+                        
+                        st.metric(f"Current {selected_index}", 
+                                f"₹{current_price:.2f}", 
+                                f"{change_pct:+.2f}%")
+                    else:
+                        st.error("Could not fetch data. Check Kite Connect permissions.")
+            else:
+                st.error("Invalid index selection")
+                
+        except Exception as e:
+            st.error(f"Error loading chart: {str(e)}")
+            st.info("Note: Kite Connect may require specific permissions for historical data.")
+    
+    with col2:
+        if st.button("Stop Live Chart", type="secondary", key="stop_kite_chart"):
+            kite_manager.stop_websocket()
+            st.session_state.kite_chart_active = False
+            st.success("WebSocket stopped")
+    
+    # Display live chart if active
+    if hasattr(st.session_state, 'kite_chart_active') and st.session_state.kite_chart_active:
+        token = st.session_state.kite_chart_token
+        placeholder = st.empty()
+        
+        # Display current candle data
+        candle = kite_manager.get_candle_data(token)
+        if candle:
+            st.subheader("Current Candle Data")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Open", f"₹{candle['open']:.2f}")
+            with col2:
+                st.metric("High", f"₹{candle['high']:.2f}")
+            with col3:
+                st.metric("Low", f"₹{candle['low']:.2f}")
+            with col4:
+                st.metric("Close", f"₹{candle['close']:.2f}")
+            
+            # Create chart
+            fig = go.Figure()
+            
+            if chart_type == "Candlestick":
+                fig.add_trace(go.Candlestick(
+                    x=[candle['timestamp']],
+                    open=[candle['open']],
+                    high=[candle['high']],
+                    low=[candle['low']],
+                    close=[candle['close']],
+                    name='Price'
+                ))
+            else:
+                fig.add_trace(go.Scatter(
+                    x=[candle['timestamp']],
+                    y=[candle['close']],
+                    mode='lines',
+                    name='Price'
+                ))
+            
+            fig.update_layout(
+                title=f'{selected_index} Live Chart',
+                xaxis_title='Time',
+                yaxis_title='Price',
+                height=500,
+                template='plotly_dark'
+            )
+            
+            placeholder.plotly_chart(fig, use_container_width=True)
+            
+            # Auto-refresh every 5 seconds
+            time.sleep(5)
+            st.rerun()
+    
+    # Also show historical data option
+    st.subheader("Historical Data")
+    col1, col2 = st.columns(2)
+    with col1:
+        interval = st.selectbox("Interval", ["minute", "5minute", "15minute", "30minute", "hour", "day"], key="kite_interval")
+    with col2:
+        days = st.slider("Days", 1, 30, 7, key="kite_days")
+    
+    if st.button("Load Historical Data", key="load_kite_historical"):
+        try:
+            symbol = INDEX_SYMBOLS[selected_index]
+            quote = kite_manager.kite.quote([symbol])
+            if symbol in quote:
+                token = quote[symbol]["instrument_token"]
+                
+                with st.spinner("Fetching historical data..."):
+                    data = kite_manager.get_live_data(token, interval, days=days)
+                    
+                    if data is not None and len(data) > 0:
+                        st.success(f"✅ Loaded {len(data)} data points")
+                        
+                        # Create historical chart
+                        fig = go.Figure()
+                        
+                        if chart_type == "Candlestick":
+                            fig.add_trace(go.Candlestick(
+                                x=data.index,
+                                open=data['open'],
+                                high=data['high'],
+                                low=data['low'],
+                                close=data['close'],
+                                name='Price'
+                            ))
+                        else:
+                            fig.add_trace(go.Scatter(
+                                x=data.index,
+                                y=data['close'],
+                                mode='lines',
+                                name='Price'
+                            ))
+                        
+                        # Add moving averages
+                        data['EMA20'] = ema(data['close'], 20)
+                        data['EMA50'] = ema(data['close'], 50)
+                        
+                        fig.add_trace(go.Scatter(
+                            x=data.index,
+                            y=data['EMA20'],
+                            mode='lines',
+                            name='EMA20',
+                            line=dict(color='orange', width=1)
+                        ))
+                        
+                        fig.add_trace(go.Scatter(
+                            x=data.index,
+                            y=data['EMA50'],
+                            mode='lines',
+                            name='EMA50',
+                            line=dict(color='blue', width=1)
+                        ))
+                        
+                        fig.update_layout(
+                            title=f'{selected_index} Historical Chart',
+                            xaxis_title='Date',
+                            yaxis_title='Price',
+                            height=600,
+                            template='plotly_dark',
+                            showlegend=True
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Show statistics
+                        current_price = data['close'].iloc[-1]
+                        prev_close = data['close'].iloc[-2] if len(data) > 1 else current_price
+                        change = current_price - prev_close
+                        change_percent = (change / prev_close) * 100
+                        
+                        cols = st.columns(4)
+                        cols[0].metric("Current Price", f"₹{current_price:.2f}")
+                        cols[1].metric("Change", f"₹{change:+.2f}")
+                        cols[2].metric("Change %", f"{change_percent:+.2f}%")
+                        cols[3].metric("Period High", f"₹{data['high'].max():.2f}")
+                        
+                    else:
+                        st.error("No historical data available")
+            else:
+                st.error("Could not get instrument token")
+        except Exception as e:
+            st.error(f"Error loading historical data: {e}")
 
-# -- removed old create_kite_live_charts() --
-
+# Enhanced Initialization with Error Handling
 def initialize_application():
     """Initialize the application with comprehensive error handling"""
     
@@ -3188,10 +3414,10 @@ try:
         perf = trader.get_performance_stats()
         
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Value", f"₹{trader.equity():,.0f}", delta=f"₹{trader.equity() - trader.initial_capital:+,.0f}", key="total_value_metric")
-        c2.metric("Available Cash", f"₹{trader.cash:,.0f}", key="cash_metric")
-        c3.metric("Open Positions", len(trader.positions), key="positions_metric")
-        c4.metric("Total P&L", f"₹{perf['total_pnl'] + perf['open_pnl']:+.2f}", key="pnl_metric")
+        c1.metric("Total Value", f"₹{trader.equity():,.0f}", delta=f"₹{trader.equity() - trader.initial_capital:+,.0f}")
+        c2.metric("Available Cash", f"₹{trader.cash:,.0f}")
+        c3.metric("Open Positions", len(trader.positions))
+        c4.metric("Total P&L", f"₹{perf['total_pnl'] + perf['open_pnl']:+.2f}")
         
         # Strategy Performance Overview
         st.subheader("Strategy Performance Overview")
@@ -3780,8 +4006,6 @@ try:
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
-                
-               # Quick execution buttons for high accuracy signals - FIXED DUPLICATE KEY ERROR
             # Quick execution buttons for high accuracy signals
             if "high_acc_signals" in locals() and high_acc_signals:
                 st.subheader("Quick Execution")
@@ -3794,18 +4018,15 @@ try:
                             f"{signal['action']} {signal['symbol'].replace('.NS', '')}",
                             key=unique_key, use_container_width=True
                         ):
-                            if kelly_sizing:
-                                try:
-                                    data15 = trader.data_manager.get_stock_data(signal["symbol"], "15m")
-                                    atr_val = data15["ATR"].iloc[-1] if "ATR" in data15.columns else signal["entry"] * 0.01
-                                except Exception:
-                                    atr_val = signal["entry"] * 0.01
-                                qty = trader.data_manager.calculate_optimal_position_size(
-                                    signal["symbol"], signal.get("win_probability", 0.75), signal.get("risk_reward", 2.0),
-                                    trader.cash, signal["entry"], atr_val
-                                )
-                            else:
-                                qty = int((trader.cash * TRADE_ALLOC) / signal["entry"])
+                            try:
+                                data15 = trader.data_manager.get_stock_data(signal["symbol"], "15m")
+                                atr_val = data15["ATR"].iloc[-1] if "ATR" in data15.columns else signal["entry"] * 0.01
+                            except Exception:
+                                atr_val = signal["entry"] * 0.01
+                            qty = trader.data_manager.calculate_optimal_position_size(
+                                signal["symbol"], signal.get("win_probability", 0.75), signal.get("risk_reward", 2.0),
+                                trader.cash, signal["entry"], atr_val
+                            )
                             success, msg = trader.execute_trade(
                                 symbol=signal["symbol"], action=signal["action"], quantity=qty, price=signal["entry"],
                                 stop_loss=signal.get("stop_loss"), target=signal.get("target"),
@@ -3819,8 +4040,8 @@ try:
     # Tab 9: Kite Live Charts (NEW TAB)
     with tabs[8]:
         create_kite_live_charts_tab(data_manager)
-    st.markdown("---")
-    st.markdown("<div style='text-align:center; color: #6b7280;'>Enhanced Intraday Terminal Pro with Full Stock Scanning & High-Quality Signal Filters | Reduced Losses & Improved Profitability | Integrated with Kite Connect</div>", unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown("<div style='text-align:center; color: #6b7280;'>Enhanced Intraday Terminal Pro with Full Stock Scanning & High-Quality Signal Filters | Reduced Losses & Improved Profitability | Integrated with Kite Connect</div>", unsafe_allow_html=True)
 
 except Exception as e:
     st.error(f"Application error: {str(e)}")
@@ -3828,11 +4049,7 @@ except Exception as e:
     logger.error(f"Application crash: {e}")
     st.code(traceback.format_exc())
 
-
-# (tick-based manager & tab were appended in a previous step)
-
-
-# ===================== TICK-BASED KITE LIVE CHARTS (NO HISTORICAL) =====================
+# ===================== TICK-ONLY KITE LIVE CHARTS =====================
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
@@ -3964,54 +4181,73 @@ class KiteConnectManagerLive:
         rows = [v for _, v in items]
         return pd.DataFrame(rows, index=idx)
 
+# Tick-only tab UI
+
 def create_kite_live_charts_tab(data_manager):
     st.subheader("📈 Kite Connect Live Charts (Tick → 1‑Min Candles)")
+
     if "kite_manager_live" not in st.session_state:
         st.session_state.kite_manager_live = KiteConnectManagerLive(KITE_API_KEY, KITE_API_SECRET)
     km = st.session_state.kite_manager_live
+
     if not km.is_authenticated:
         if km.login():
             st.rerun()
         return
-    INDEX_TOKENS = {"NIFTY 50":256265,"BANKNIFTY":260105,"FINNIFTY":257801}
-    left,right = st.columns([3,1])
+
+    INDEX_TOKENS = {
+        "NIFTY 50": 256265,
+        "BANKNIFTY": 260105,
+        "FINNIFTY": 257801,
+    }
+
+    left, right = st.columns([3, 1])
     with left:
-        selected_index = st.selectbox("Select Index", list(INDEX_TOKENS.keys()), key="kite_live_index_final2")
+        selected_index = st.selectbox("Select Index", list(INDEX_TOKENS.keys()), key="kite_live_index_fixed2")
     with right:
-        max_bars = st.number_input("Bars", 30, 240, 120, 10)
-    c1,c2,_ = st.columns([1,1,6])
+        max_bars = st.number_input("Bars", min_value=30, max_value=240, value=120, step=10)
+
+    c1, c2, _ = st.columns([1, 1, 6])
     start_clicked = c1.button("▶️ Start Live", type="primary", use_container_width=True)
     stop_clicked = c2.button("⏹ Stop", type="secondary", use_container_width=True)
-    if "kite_live_state_final2" not in st.session_state:
-        st.session_state.kite_live_state_final2 = {"active":False,"token":None,"index":None}
+
+    if "kite_live_state_fixed2" not in st.session_state:
+        st.session_state.kite_live_state_fixed2 = {"active": False, "token": None, "index": None}
+
     token = INDEX_TOKENS[selected_index]
+
     if start_clicked:
-        if km.start_websocket([token]):
-            st.session_state.kite_live_state_final2 = {"active":True,"token":token,"index":selected_index}
+        ok = km.start_websocket([token])
+        if ok:
+            st.session_state.kite_live_state_fixed2 = {"active": True, "token": token, "index": selected_index}
             st.success(f"✅ Live started for {selected_index}")
         else:
             st.error("Failed to start WebSocket. Check Kite access token / permissions.")
+
     if stop_clicked:
         km.stop_websocket()
-        st.session_state.kite_live_state_final2 = {"active":False,"token":None,"index":None}
+        st.session_state.kite_live_state_fixed2 = {"active": False, "token": None, "index": None}
         st.info("Stopped live streaming")
-    live = st.session_state.kite_live_state_final2
-    if live["active"] and live["token"]==token:
-        st_autorefresh(interval=5000, key="kite_live_refresh_final2", limit=None)
+
+    live = st.session_state.kite_live_state_fixed2
+    if live["active"] and live["token"] == token:
+        st_autorefresh(interval=5000, key="kite_live_refresh_fixed2", limit=None)
         df = km.get_candle_df(token, lookback=max_bars)
         if df.empty:
             st.info("Waiting for ticks to build first candle...")
             return
         fig = go.Figure()
-        fig.add_candlestick(x=df.index, open=df["open"], high=df["high"], low=df["low"], close=df["close"]) 
+        fig.add_candlestick(x=df.index, open=df["open"], high=df["high"], low=df["low"], close=df["close"], name="Price")
         fig.update_layout(height=560, title=f"{live['index']} – Live (1‑min)", xaxis_rangeslider_visible=False, template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
+
         last = df.iloc[-1]
-        c = st.columns(4)
-        c[0].metric("Open", f"₹{last['open']:.2f}")
-        c[1].metric("High", f"₹{last['high']:.2f}")
-        c[2].metric("Low", f"₹{last['low']:.2f}")
-        c[3].metric("Close", f"₹{last['close']:.2f}")
+        cols = st.columns(4)
+        cols[0].metric("Open", f"₹{last['open']:.2f}")
+        cols[1].metric("High", f"₹{last['high']:.2f}")
+        cols[2].metric("Low",  f"₹{last['low']:.2f}")
+        cols[3].metric("Close",f"₹{last['close']:.2f}")
         st.caption(f"WebSocket: **{'Running' if km.ws_running else 'Stopped'}** · Subscribed tokens: {len(km.subscribed_tokens)}")
     else:
         st.info("Click **Start Live** to begin streaming 1‑minute candles.")
+# ===================== END TICK-ONLY KITE LIVE CHARTS =====================
