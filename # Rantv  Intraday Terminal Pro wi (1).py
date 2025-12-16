@@ -4007,41 +4007,45 @@ try:
                         </div>
                         """, unsafe_allow_html=True)
                 
-               # Quick execution buttons for high accuracy signals - FIXED DUPLICATE KEY ERROR
-st.subheader("Quick Execution")
-exec_cols = st.columns(3)
-for idx, signal in enumerate(high_acc_signals[:6]):  # Show first 6
-    with exec_cols[idx % 3]:
-        # Create truly unique key with random component
-        import uuid
-        unique_key = f"high_acc_exec_{signal['symbol']}_{idx}_{str(uuid.uuid4())[:8]}"
-        if st.button(
-            f"{signal['action']} {signal['symbol'].replace('.NS', '')}", 
-            key=unique_key,
-            width='stretch'
-        ):
-            if kelly_sizing:
-                qty = trader.data_manager.calculate_optimal_position_size(
-                    signal["symbol"], signal["win_probability"], signal["risk_reward"], 
-                    trader.cash, signal["entry"], 
-                    trader.data_manager.get_stock_data(signal["symbol"], "15m")["ATR"].iloc[-1]
-                )
+                              # Quick execution buttons for high accuracy signals - FIXED DUPLICATE KEY ERROR
+                st.subheader("Quick Execution")
+                exec_cols = st.columns(3)
+                for idx, signal in enumerate(high_acc_signals[:6]):  # Show first 6
+                    with exec_cols[idx % 3]:
+                        # Create truly unique key with random component
+                        import uuid
+                        unique_key = f"high_acc_exec_{signal['symbol']}_{idx}_{str(uuid.uuid4())[:8]}"
+                        if st.button(
+                            f"{signal['action']} {signal['symbol'].replace('.NS', '')}", 
+                            key=unique_key,
+                            width='stretch'
+                        ):
+                            if kelly_sizing:
+                                qty = trader.data_manager.calculate_optimal_position_size(
+                                    signal["symbol"], signal["win_probability"], signal["risk_reward"], 
+                                    trader.cash, signal["entry"], 
+                                    trader.data_manager.get_stock_data(signal["symbol"], "15m")["ATR"].iloc[-1]
+                                )
+                            else:
+                                qty = int((trader.cash * TRADE_ALLOC) / signal["entry"])
+                            
+                            success, msg = trader.execute_trade(
+                                symbol=signal["symbol"],
+                                action=signal["action"],
+                                quantity=qty,
+                                price=signal["entry"],
+                                stop_loss=signal["stop_loss"],
+                                target=signal["target"],
+                                win_probability=signal.get("win_probability", 0.75),
+                                strategy=signal.get("strategy")
+                            )
+                            if success:
+                                st.success(msg)
+                                st.rerun()
             else:
-                qty = int((trader.cash * TRADE_ALLOC) / signal["entry"])
-            
-            success, msg = trader.execute_trade(
-                symbol=signal["symbol"],
-                action=signal["action"],
-                quantity=qty,
-                price=signal["entry"],
-                stop_loss=signal["stop_loss"],
-                target=signal["target"],
-                win_probability=signal.get("win_probability", 0.75),
-                strategy=signal.get("strategy")
-            )
-            if success:
-                st.success(msg)
-                st.rerun()
+                st.warning("No high-accuracy signals found. Try adjusting the filters or scanning during peak market hours.")
+        else:
+            st.info("Click '🚀 Scan High Accuracy' to start scanning for high-confidence trading signals.")
 
     # Tab 9: Kite Live Charts (NEW TAB)
     with tabs[8]:
@@ -4055,4 +4059,3 @@ except Exception as e:
     st.info("Please refresh the page and try again")
     logger.error(f"Application crash: {e}")
     st.code(traceback.format_exc())
-
