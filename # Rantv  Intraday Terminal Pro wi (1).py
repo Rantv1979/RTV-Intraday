@@ -1,4 +1,4 @@
-# Rantv Intraday Trading Signals & Market Analysis - PRODUCTION READY
+    # Rantv Intraday Trading Signals & Market Analysis - PRODUCTION READY
 # ENHANCED VERSION WITH FULL STOCK SCANNING & BETTER SIGNAL QUALITY
 # UPDATED: Lowered confidence to 70%, score to 6, added ADX trend filter, optimized for peak hours
 # INTEGRATED WITH KITE CONNECT FOR LIVE CHARTS
@@ -3801,14 +3801,14 @@ try:
         perf = trader.get_performance_stats()
         
         col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Trades", perf['total_trades'], key="total_trades_metric")
-        with col2:
-            st.metric("Win Rate", f"{perf['win_rate']:.1%}", key="win_rate_metric")
-        with col3:
-            st.metric("Total P&L", f"₹{perf['total_pnl']:+.2f}", key="total_pnl_metric")
-        with col4:
-            st.metric("Open P&L", f"₹{perf['open_pnl']:+.2f}", key="open_pnl_metric")
+with col1:
+    st.metric("Total Trades", perf['total_trades'], key="total_trades_metric")
+with col2:
+    st.metric("Win Rate", f"{perf['win_rate']:.1%}", key="win_rate_metric")
+with col3:
+    st.metric("Total P&L", f"₹{perf['total_pnl']:+.2f}", key="total_pnl_metric")
+with col4:
+    st.metric("Open P&L", f"₹{perf['open_pnl']:+.2f}", key="open_pnl_metric")
 
     # Tab 4: Trade History
     with tabs[3]:
@@ -4059,3 +4059,4 @@ except Exception as e:
     st.info("Please refresh the page and try again")
     logger.error(f"Application crash: {e}")
     st.code(traceback.format_exc())
+
