@@ -2749,7 +2749,8 @@ class MultiStrategyIntradayTrader:
 
 # Enhanced Kite Live Charts Function
 
-# Enhanced Initialization with Error Handling
+# -- removed old create_kite_live_charts() --
+
 def initialize_application():
     """Initialize the application with comprehensive error handling"""
     
@@ -3819,8 +3820,7 @@ for idx, signal in enumerate(high_acc_signals[:6]):  # Show first 6
     # Tab 9: Kite Live Charts (NEW TAB)
     with tabs[8]:
     create_kite_live_charts_tab(data_manager)
-
-    st.markdown("---")
+st.markdown("---")
     st.markdown("<div style='text-align:center; color: #6b7280;'>Enhanced Intraday Terminal Pro with Full Stock Scanning & High-Quality Signal Filters | Reduced Losses & Improved Profitability | Integrated with Kite Connect</div>", unsafe_allow_html=True)
 
 except Exception as e:
@@ -3831,10 +3831,11 @@ except Exception as e:
 
 
 
+
 # ===================== TICK-BASED KITE LIVE CHARTS (NO HISTORICAL) =====================
 import plotly.graph_objects as go
-from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
 
 try:
     from kiteconnect import KiteConnect, KiteTicker
@@ -3842,7 +3843,6 @@ except Exception:
     KiteConnect = None
     KiteTicker = None
 
-# Live-only manager: builds 1-min candles from ticks
 class KiteConnectManagerLive:
     def __init__(self, api_key, api_secret):
         self.api_key = api_key
@@ -3964,11 +3964,10 @@ class KiteConnectManagerLive:
         rows = [v for _, v in items]
         return pd.DataFrame(rows, index=idx)
 
-# Tick-based tab (no historical)
+# Tick-only tab
 def create_kite_live_charts_tab(data_manager):
     st.subheader("📈 Kite Connect Live Charts (Tick → 1‑Min Candles)")
 
-    # Dedicated live manager to avoid side effects on other parts of the app
     if "kite_manager_live" not in st.session_state:
         st.session_state.kite_manager_live = KiteConnectManagerLive(KITE_API_KEY, KITE_API_SECRET)
     km = st.session_state.kite_manager_live
@@ -3986,7 +3985,7 @@ def create_kite_live_charts_tab(data_manager):
 
     left, right = st.columns([3, 1])
     with left:
-        selected_index = st.selectbox("Select Index", list(INDEX_TOKENS.keys()), key="kite_live_index_v2")
+        selected_index = st.selectbox("Select Index", list(INDEX_TOKENS.keys()), key="kite_live_index_v3")
     with right:
         max_bars = st.number_input("Bars", min_value=30, max_value=240, value=120, step=10)
 
@@ -3994,27 +3993,27 @@ def create_kite_live_charts_tab(data_manager):
     start_clicked = c1.button("▶️ Start Live", type="primary", use_container_width=True)
     stop_clicked = c2.button("⏹ Stop", type="secondary", use_container_width=True)
 
-    if "kite_live_state_v2" not in st.session_state:
-        st.session_state.kite_live_state_v2 = {"active": False, "token": None, "index": None}
+    if "kite_live_state_v3" not in st.session_state:
+        st.session_state.kite_live_state_v3 = {"active": False, "token": None, "index": None}
 
     token = INDEX_TOKENS[selected_index]
 
     if start_clicked:
         ok = km.start_websocket([token])
         if ok:
-            st.session_state.kite_live_state_v2 = {"active": True, "token": token, "index": selected_index}
+            st.session_state.kite_live_state_v3 = {"active": True, "token": token, "index": selected_index}
             st.success(f"✅ Live started for {selected_index}")
         else:
             st.error("Failed to start WebSocket. Check Kite access token / permissions.")
 
     if stop_clicked:
         km.stop_websocket()
-        st.session_state.kite_live_state_v2 = {"active": False, "token": None, "index": None}
+        st.session_state.kite_live_state_v3 = {"active": False, "token": None, "index": None}
         st.info("Stopped live streaming")
 
-    live = st.session_state.kite_live_state_v2
+    live = st.session_state.kite_live_state_v3
     if live["active"] and live["token"] == token:
-        st_autorefresh(interval=5000, key="kite_live_refresh_v2", limit=None)
+        st_autorefresh(interval=5000, key="kite_live_refresh_v3", limit=None)
         df = km.get_candle_df(token, lookback=max_bars)
         if df.empty:
             st.info("Waiting for ticks to build first candle...")
