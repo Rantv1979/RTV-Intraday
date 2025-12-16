@@ -3812,83 +3812,6 @@ with col4:
 
     # Tab 4: Trade History
     with tabs[3]:
-        st.subheader("📋 Trade History")
-        
-        if SQLALCHEMY_AVAILABLE and trader.data_manager.database.connected:
-            st.success("✅ Database connected - trades are being stored")
-        else:
-            st.warning("⚠️ Database not available - showing recent trades only")
-        
-        trade_history = trader.get_trade_history_data()
-        if trade_history:
-            # Create DataFrame for display
-            df_history = pd.DataFrame(trade_history)
-            
-            # Display with HTML formatting
-            for _, trade in df_history.iterrows():
-                st.markdown(f"""
-                <div class="{trade.get('_row_class', '')}">
-                    <div style="padding: 10px;">
-                        <strong>{trade['Symbol']}</strong> | {trade['Action']} | Qty: {trade['Quantity']}<br>
-                        Entry: {trade['Entry Price']} | Exit: {trade['Exit Price']} | {trade['P&L']}<br>
-                        Duration: {trade['Duration']} | Strategy: {trade['Strategy']}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("No trade history available")
-
-    # Tab 5: RSI Extreme
-    with tabs[4]:
-        st.subheader("📉 RSI Extreme Scanner")
-        
-        st.info("This scanner finds stocks with extreme RSI values (oversold/overbought)")
-        
-        if st.button("Scan for RSI Extremes", key="rsi_scan_btn"):
-            with st.spinner("Scanning for RSI extremes..."):
-                try:
-                    oversold = []
-                    overbought = []
-                    
-                    # Scan top 30 stocks for performance
-                    for symbol in NIFTY_50[:30]:
-                        data = data_manager.get_stock_data(symbol, "15m")
-                        if len(data) > 0:
-                            rsi_val = (data['RSI14'].iloc[-1] if 'RSI14' in data and data['RSI14'].dropna().shape[0] > 0 else 50.0)
-                            price = data['Close'].iloc[-1]
-                            
-                            if rsi_val < 30:
-                                oversold.append({
-                                    "Symbol": symbol.replace(".NS", ""),
-                                    "RSI": round(rsi_val, 2),
-                                    "Price": round(price, 2),
-                                    "Signal": "OVERSOLD"
-                                })
-                            elif rsi_val > 70:
-                                overbought.append({
-                                    "Symbol": symbol.replace(".NS", ""),
-                                    "RSI": round(rsi_val, 2),
-                                    "Price": round(price, 2),
-                                    "Signal": "OVERBOUGHT"
-                                })
-                    
-                    if oversold or overbought:
-                        st.success(f"Found {len(oversold)} oversold and {len(overbought)} overbought stocks")
-                        
-                        if oversold:
-                            st.subheader("🔵 Oversold Stocks (RSI < 30)")
-                            df_oversold = pd.DataFrame(oversold)
-                            st.dataframe(df_oversold, width='stretch')
-                        
-                        if overbought:
-                            st.subheader("🔴 Overbought Stocks (RSI > 70)")
-                            df_overbought = pd.DataFrame(overbought)
-                            st.dataframe(df_overbought, width='stretch')
-                    else:
-                        st.info("No extreme RSI stocks found")
-                        
-                except Exception as e:
-                    st.error(f"Error scanning RSI extremes: {str(e)}")
 
     # Tab 6: Backtest
     with tabs[5]:
@@ -4058,6 +3981,7 @@ except Exception as e:
     st.info("Please refresh the page and try again")
     logger.error(f"Application crash: {e}")
     st.code(traceback.format_exc())
+
 
 
 
