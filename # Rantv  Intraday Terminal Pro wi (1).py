@@ -1,4 +1,4 @@
-    # Rantv Intraday Trading Signals & Market Analysis - PRODUCTION READY
+        # Rantv Intraday Trading Signals & Market Analysis - PRODUCTION READY
 # ENHANCED VERSION WITH FULL STOCK SCANNING & BETTER SIGNAL QUALITY
 # UPDATED: Lowered confidence to 70%, score to 6, added ADX trend filter, optimized for peak hours
 # INTEGRATED WITH KITE CONNECT FOR LIVE CHARTS
@@ -3414,10 +3414,10 @@ try:
         perf = trader.get_performance_stats()
         
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Value", f"₹{trader.equity():,.0f}", delta=f"₹{trader.equity() - trader.initial_capital:+,.0f}", key="total_value_metric")
-        c2.metric("Available Cash", f"₹{trader.cash:,.0f}", key="cash_metric")
-        c3.metric("Open Positions", len(trader.positions), key="positions_metric")
-        c4.metric("Total P&L", f"₹{perf['total_pnl'] + perf['open_pnl']:+.2f}", key="pnl_metric")
+        c1.metric("Total Value", f"₹{trader.equity():,.0f}", delta=f"₹{trader.equity() - trader.initial_capital:+,.0f}")
+        c2.metric("Available Cash", f"₹{trader.cash:,.0f}")
+        c3.metric("Open Positions", len(trader.positions))
+        c4.metric("Total P&L", f"₹{perf['total_pnl'] + perf['open_pnl']:+.2f}")
         
         # Strategy Performance Overview
         st.subheader("Strategy Performance Overview")
@@ -3802,13 +3802,13 @@ try:
         
         col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("Total Trades", perf['total_trades'], key="total_trades_metric")
+    st.metric("Total Trades", perf['total_trades'])
 with col2:
-    st.metric("Win Rate", f"{perf['win_rate']:.1%}", key="win_rate_metric")
+    st.metric("Win Rate", f"{perf['win_rate']:.1%}")
 with col3:
-    st.metric("Total P&L", f"₹{perf['total_pnl']:+.2f}", key="total_pnl_metric")
+    st.metric("Total P&L", f"₹{perf['total_pnl']:+.2f}")
 with col4:
-    st.metric("Open P&L", f"₹{perf['open_pnl']:+.2f}", key="open_pnl_metric")
+    st.metric("Open P&L", f"₹{perf['open_pnl']:+.2f}")
 
     # Tab 4: Trade History
     with tabs[3]:
@@ -4059,4 +4059,5 @@ except Exception as e:
     st.info("Please refresh the page and try again")
     logger.error(f"Application crash: {e}")
     st.code(traceback.format_exc())
+
 
