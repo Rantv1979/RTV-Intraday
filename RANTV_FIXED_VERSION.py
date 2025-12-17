@@ -688,26 +688,38 @@ class KiteConnectManager:
         self.ws_running = False
         
     def check_oauth_callback(self):
-        """Check for OAuth callback with request_token in URL"""
-        try:
-      query_params = st.query_params
-      if "request_token" in query_params:
-        # Avoid processing multiple times on rerun/autorefresh
-        if not st.session_state.get("oauth_processed", False):
-            request_token = query_params.get("request_token")
-            if request_token and self.api_key and self.api_secret:
-                ok = self.exchange_request_token(request_token)
-                if ok:
-                    # Mark processed before rerun
-                    st.session_state["oauth_processed"] = True
-                    # Safely clear query params
-                    st.experimental_set_query_params()  # clears params
-                    st.rerun()
-                return ok
-        # Already processed in this session
-        return True
-except Exception as e:
-    logger.error(f"OAuth callback error    logger.error(f"OAuth callback error: {e}")
+    """Check for OAuth callback with request_token in URL"""
+       try:
+           # Use experimental API to read query params (dict[str, List[str]])
+           query_params = st.experimental_get_query_params()
+
+            # If request_token is present, process once
+            if "request_token" in query_params:
+                # Avoid re-processing on every rerun/autorefresh
+                if not st.session_state.get("oauth_processed", False):
+                    # query_params values are lists: get first value safely
+                    raw_val = query_params.get("request_token", [])
+                    request_token = raw_val[0] if isinstance(raw_val, list) and raw_val else None
+
+                    if request_token and self.api_key and self.api_secret:
+                        ok = self.exchange_request_token(request_token)
+                        if ok:
+                            # Mark processed before rerun
+                            st.session_state["oauth_processed"] = True
+                            # Clear params from the URL bar
+                            st.experimental_set_query_params()
+                            # Rerun exactly once to render the authenticated state
+                            st.rerun()
+                        return ok
+
+                # Already processed in this session; treat as handled
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"OAuth callback error: {e}")
+
 
     
     def exchange_request_token(self, request_token):
