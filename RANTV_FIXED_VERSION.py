@@ -690,14 +690,28 @@ class KiteConnectManager:
     def check_oauth_callback(self):
         """Check for OAuth callback with request_token in URL"""
         try:
-            query_params = st.query_params
-            if "request_token" in query_params:
-                request_token = query_params.get("request_token")
-                if request_token and self.api_key and self.api_secret:
-                    return self.exchange_request_token(request_token)
-        except Exception as e:
-            logger.error(f"OAuth callback error: {e}")
-        return False
+           
+# inside KiteConnectManager.check_oauth_callback(self):
+try:
+    query_params = st.query_params
+    if "request_token" in query_params:
+        # Avoid processing multiple times on rerun/autorefresh
+        if not st.session_state.get("oauth_processed", False):
+            request_token = query_params.get("request_token")
+            if request_token and self.api_key and self.api_secret:
+                ok = self.exchange_request_token(request_token)
+                if ok:
+                    # Mark processed before rerun
+                    st.session_state["oauth_processed"] = True
+                    # Safely clear query params
+                    st.experimental_set_query_params()  # clears params
+                    st.rerun()
+                return ok
+        # Already processed in this session
+        return True
+except Exception as e:
+    logger.error(f"OAuth callback error    logger.error(f"OAuth callback error: {e}")
+
     
     def exchange_request_token(self, request_token):
         """Exchange request_token for access_token"""
