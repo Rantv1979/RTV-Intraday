@@ -690,11 +690,8 @@ class KiteConnectManager:
     def check_oauth_callback(self):
         """Check for OAuth callback with request_token in URL"""
         try:
-           
-# inside KiteConnectManager.check_oauth_callback(self):
-try:
-    query_params = st.query_params
-    if "request_token" in query_params:
+      query_params = st.query_params
+      if "request_token" in query_params:
         # Avoid processing multiple times on rerun/autorefresh
         if not st.session_state.get("oauth_processed", False):
             request_token = query_params.get("request_token")
