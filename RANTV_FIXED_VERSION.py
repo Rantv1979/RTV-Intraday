@@ -688,10 +688,13 @@ class KiteConnectManager:
         self.ws_running = False
         
     def check_oauth_callback(self):
-    """Check for OAuth callback with request_token in URL"""
-       try:
-           # Use experimental API to read query params (dict[str, List[str]])
-           query_params = st.experimental_get_query_params()
+         """
+         Check for OAuth callback with request_token in URL.
+         Ensures we only process once per session to avoid rerun loops.
+        """
+        try:
+            # Use experimental API to read query params (dict[str, List[str]])
+            query_params = st.experimental_get_query_params()
 
             # If request_token is present, process once
             if "request_token" in query_params:
