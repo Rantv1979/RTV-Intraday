@@ -1046,7 +1046,7 @@ class KiteConnectManager:
         except Exception as e:
             logger.error(f"Logout error: {e}")
             return False
-``
+
     def logout(self):
         """Logout from Kite Connect"""
         try:
