@@ -87,9 +87,9 @@ logger = logging.getLogger(__name__)
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
-# Kite Connect API Credentials
-KITE_API_KEY = os.environ.get("KITE_API_KEY", "pwnmsnpy30s4uotu")
-KITE_API_SECRET = os.environ.get("KITE_API_SECRET", "m44rfdl9ligc4ctaq7r9sxkxpgnfm30m")
+# Kite Connect API Credentials - UPDATED
+KITE_API_KEY = "np4vpl4wq4yez03u"
+KITE_API_SECRET = "hqorfq94c0qupc9gvjqps8tdsr0kfa86"
 KITE_ACCESS_TOKEN = ""  # Will be set after login
 
 # Configuration
@@ -327,28 +327,6 @@ st.markdown("""
         font-size: 14px;
     }
     
-    .rsi-oversold { 
-        background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
-        border-left: 4px solid #059669;
-    }
-    
-    .rsi-overbought { 
-        background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
-        border-left: 4px solid #dc2626;
-    }
-    
-    .bullish-signal { 
-        background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
-        border-left: 4px solid #059669;
-        border-radius: 8px;
-    }
-    
-    .bearish-signal { 
-        background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
-        border-left: 4px solid #dc2626;
-        border-radius: 8px;
-    }
-    
     .metric-card {
         background: white;
         padding: 15px;
@@ -473,6 +451,15 @@ st.markdown("""
         border-radius: 8px;
         margin: 8px 0;
         border-left: 4px solid #b91c1c;
+    }
+    
+    .kite-login-container {
+        background: linear-gradient(135deg, #1e3a8a 0%, #3730a3 100%);
+        color: white;
+        padding: 20px;
+        border-radius: 12px;
+        margin: 20px 0;
+        text-align: center;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -742,15 +729,36 @@ class KiteConnectManager:
                 st.info("Completing authentication…")
                 return False
 
-            st.info("Kite Connect authentication required for live charts.")
+            # Display Kite Login Section
+            st.markdown("""
+            <div class="kite-login-container">
+                <h3>🔐 Kite Connect Authentication Required</h3>
+                <p>Connect your Zerodha Kite account for live charts and trading</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
             login_url = self.kite.login_url()
-
-            st.link_button("🔐 Login with Kite", login_url, use_container_width=True)
-
+            
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.markdown(f"""
+                ### Login Steps:
+                1. Click the "Login with Kite" button below
+                2. You'll be redirected to Zerodha Kite login page
+                3. Login with your Zerodha credentials
+                4. You'll be redirected back here automatically
+                
+                **API Key:** `{self.api_key[:8]}...`
+                """)
+            
+            with col2:
+                st.link_button("🔐 Login with Kite", login_url, use_container_width=True, type="primary")
+            
+            st.markdown("---")
             st.markdown("**Or enter access token manually:**")
             with st.form("kite_login_form"):
                 access_token = st.text_input("Access Token", type="password", help="Paste your access token from Kite Connect")
-                submit = st.form_submit_button("Authenticate", type="primary")
+                submit = st.form_submit_button("Authenticate", type="secondary")
 
             if submit and access_token:
                 try:
@@ -765,7 +773,8 @@ class KiteConnectManager:
                     except Exception:
                         pass
                     self.is_authenticated = True
-                    st.success(f"Authenticated as {user_name}")
+                    st.success(f"✅ Authenticated as {user_name}")
+                    st.rerun()
                     return True
                 except Exception as e:
                     st.error(f"Authentication failed: {str(e)}")
@@ -791,6 +800,54 @@ class KiteConnectManager:
         except Exception as e:
             logger.error(f"Logout error: {e}")
             return False
+
+    def get_live_data(self, instrument_token, interval="minute", from_date=None, to_date=None):
+        """Get live data from Kite Connect"""
+        if not self.is_authenticated:
+            return None
+            
+        try:
+            if from_date is None:
+                from_date = datetime.now().date()
+            if to_date is None:
+                to_date = datetime.now().date()
+                
+            from_str = from_date.strftime("%Y-%m-%d")
+            to_str = to_date.strftime("%Y-%m-%d")
+            
+            data = self.kite.historical_data(
+                instrument_token=instrument_token,
+                from_date=from_str,
+                to_date=to_str,
+                interval=interval,
+                continuous=False,
+                oi=False
+            )
+            
+            if data:
+                df = pd.DataFrame(data)
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                return df
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error fetching Kite data: {e}")
+            return None
+
+    def get_live_quote(self, instrument_token):
+        """Get live quote for an instrument"""
+        if not self.is_authenticated:
+            return None
+            
+        try:
+            quote = self.kite.quote([instrument_token])
+            if instrument_token in quote:
+                return quote[instrument_token]
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching live quote: {e}")
+            return None
 
 # NEW: Advanced Risk Management System
 class AdvancedRiskManager:
@@ -1765,6 +1822,189 @@ class MultiStrategyIntradayTrader:
         self.last_auto_execution_time = time.time()
         return executed
 
+# Enhanced Kite Live Charts Function
+def create_kite_live_charts():
+    """Create simplified Kite Connect Live Charts"""
+    st.subheader("📈 Kite Connect Live Charts")
+    
+    # Initialize Kite Connect
+    if "kite_manager" not in st.session_state:
+        st.session_state.kite_manager = KiteConnectManager(KITE_API_KEY, KITE_API_SECRET)
+    
+    kite_manager = st.session_state.kite_manager
+    
+    # Check if already authenticated
+    if not kite_manager.is_authenticated:
+        st.info("Kite Connect authentication required for live charts.")
+        if kite_manager.login():
+            st.rerun()
+        return
+    
+    # Show user info
+    if hasattr(st.session_state, 'kite_user_name'):
+        st.success(f"✅ Authenticated as: {st.session_state.kite_user_name}")
+    
+    # Index selection
+    st.subheader("📊 Select Index for Chart")
+    selected_index = st.selectbox("Select Index", ["NIFTY 50", "BANKNIFTY", "FINNIFTY", "SENSEX"])
+    
+    # Chart type selection
+    chart_type = st.selectbox("Chart Type", ["Line", "Candlestick"])
+    
+    # Interval selection
+    interval = st.selectbox("Interval", ["1m", "5m", "15m", "30m", "1h", "1d"])
+    
+    # Period selection
+    period_days = st.slider("Period (Days)", 1, 30, 7)
+    
+    if st.button("📈 Load Chart", type="primary"):
+        try:
+            # Map index symbols to NSE tokens
+            token_map = {
+                "NIFTY 50": 256265,
+                "BANKNIFTY": 260105,
+                "FINNIFTY": 257801,
+                "SENSEX": 265
+            }
+            
+            token = token_map.get(selected_index)
+            if token:
+                with st.spinner(f"Fetching {selected_index} data..."):
+                    # Get historical data
+                    from_date = datetime.now().date() - timedelta(days=period_days)
+                    to_date = datetime.now().date()
+                    
+                    data = kite_manager.get_live_data(token, interval, from_date, to_date)
+                    
+                    if data is not None and len(data) > 0:
+                        # Create chart
+                        fig = go.Figure()
+                        
+                        if chart_type == "Candlestick":
+                            fig.add_trace(go.Candlestick(
+                                x=data.index,
+                                open=data['open'],
+                                high=data['high'],
+                                low=data['low'],
+                                close=data['close'],
+                                name='Price'
+                            ))
+                        else:
+                            fig.add_trace(go.Scatter(
+                                x=data.index,
+                                y=data['close'],
+                                mode='lines',
+                                name='Price',
+                                line=dict(color='#1e3a8a', width=2)
+                            ))
+                        
+                        # Add moving averages
+                        data['EMA20'] = ema(data['close'], 20)
+                        data['EMA50'] = ema(data['close'], 50)
+                        
+                        fig.add_trace(go.Scatter(
+                            x=data.index,
+                            y=data['EMA20'],
+                            mode='lines',
+                            name='EMA20',
+                            line=dict(color='orange', width=1)
+                        ))
+                        
+                        fig.add_trace(go.Scatter(
+                            x=data.index,
+                            y=data['EMA50'],
+                            mode='lines',
+                            name='EMA50',
+                            line=dict(color='blue', width=1)
+                        ))
+                        
+                        fig.update_layout(
+                            title=f'{selected_index} Live Chart',
+                            xaxis_title='Date',
+                            yaxis_title='Price',
+                            height=500,
+                            template='plotly_white',
+                            showlegend=True
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Show current stats
+                        current_price = data['close'].iloc[-1]
+                        prev_close = data['close'].iloc[-2] if len(data) > 1 else current_price
+                        change_pct = ((current_price - prev_close) / prev_close) * 100
+                        
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Current Price", f"₹{current_price:.2f}")
+                        col2.metric("Change", f"{change_pct:+.2f}%")
+                        col3.metric("Period High", f"₹{data['high'].max():.2f}")
+                        
+                        # Show additional stats
+                        st.subheader("📊 Technical Indicators")
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        # Calculate RSI
+                        delta = data['close'].diff()
+                        gain = delta.clip(lower=0).rolling(window=14).mean()
+                        loss = (-delta.clip(upper=0)).rolling(window=14).mean()
+                        rs = gain / loss.replace(0, np.nan)
+                        rsi_val = 100 - (100 / (1 + rs)).iloc[-1]
+                        
+                        col1.metric("RSI (14)", f"{rsi_val:.1f}")
+                        col2.metric("EMA20", f"₹{data['EMA20'].iloc[-1]:.2f}")
+                        col3.metric("EMA50", f"₹{data['EMA50'].iloc[-1]:.2f}")
+                        col4.metric("Volume", f"{data['volume'].iloc[-1]:,.0f}")
+                        
+                    else:
+                        st.error("Could not fetch data. Please check your Kite Connect permissions.")
+            else:
+                st.error("Invalid index selection")
+                
+        except Exception as e:
+            st.error(f"Error loading chart: {str(e)}")
+            st.info("Note: Kite Connect may require specific permissions for historical data.")
+    
+    # Real-time quotes section
+    st.subheader("📊 Real-time Quotes")
+    
+    if st.button("🔄 Refresh Quotes", type="secondary"):
+        try:
+            # Get NIFTY 50 and BANKNIFTY quotes
+            nifty_token = 256265
+            banknifty_token = 260105
+            
+            nifty_quote = kite_manager.get_live_quote(nifty_token)
+            banknifty_quote = kite_manager.get_live_quote(banknifty_token)
+            
+            col1, col2 = st.columns(2)
+            
+            if nifty_quote:
+                with col1:
+                    st.metric("NIFTY 50", 
+                             f"₹{nifty_quote['last_price']:.2f}", 
+                             f"{((nifty_quote['last_price'] - nifty_quote['ohlc']['open']) / nifty_quote['ohlc']['open'] * 100):+.2f}%")
+                    st.write(f"Open: ₹{nifty_quote['ohlc']['open']:.2f}")
+                    st.write(f"High: ₹{nifty_quote['ohlc']['high']:.2f}")
+                    st.write(f"Low: ₹{nifty_quote['ohlc']['low']:.2f}")
+            
+            if banknifty_quote:
+                with col2:
+                    st.metric("BANKNIFTY", 
+                             f"₹{banknifty_quote['last_price']:.2f}", 
+                             f"{((banknifty_quote['last_price'] - banknifty_quote['ohlc']['open']) / banknifty_quote['ohlc']['open'] * 100):+.2f}%")
+                    st.write(f"Open: ₹{banknifty_quote['ohlc']['open']:.2f}")
+                    st.write(f"High: ₹{banknifty_quote['ohlc']['high']:.2f}")
+                    st.write(f"Low: ₹{banknifty_quote['ohlc']['low']:.2f}")
+                    
+        except Exception as e:
+            st.error(f"Error fetching quotes: {str(e)}")
+    
+    # Logout button
+    if st.button("🚪 Logout from Kite", type="secondary"):
+        kite_manager.logout()
+        st.success("Logged out from Kite Connect")
+        st.rerun()
+
 # Enhanced Initialization with Error Handling
 def initialize_application():
     """Initialize the application with comprehensive error handling"""
@@ -1972,7 +2212,7 @@ try:
                 st.sidebar.write(f"💰 P&L: ₹{perf['pnl']:+.2f}")
                 st.sidebar.markdown("---")
 
-    # Enhanced Tabs
+    # Enhanced Tabs - ADDED KITE LIVE CHARTS TAB
     tabs = st.tabs([
         "📈 Dashboard", 
         "🚦 Signals", 
@@ -1980,7 +2220,8 @@ try:
         "📋 Trade History",
         "📉 RSI Extreme", 
         "⚡ Strategies",
-        "🎯 High Accuracy Scanner"
+        "🎯 High Accuracy Scanner",
+        "📊 Kite Live Charts"  # NEW TAB ADDED
     ])
 
     # Tab 1: Dashboard
@@ -2425,8 +2666,42 @@ try:
             else:
                 st.info("No high-accuracy signals found. Try adjusting the filters or wait for better market conditions.")
 
+    # Tab 8: Kite Live Charts (NEW TAB)
+    with tabs[7]:
+        create_kite_live_charts()
+        
+    # Diagnostic panel for Kite OAuth
+    with st.sidebar.expander("🛠 Kite OAuth Diagnostic", expanded=False):
+        try:
+            q = dict(st.query_params)
+        except Exception:
+            try:
+                q = dict(st.experimental_get_query_params())
+            except Exception:
+                q = {}
+
+        st.write("Query params detected:", q)
+        st.write("kite_oauth_consumed:", st.session_state.get("kite_oauth_consumed"))
+        st.write("kite_oauth_consumed_at:", st.session_state.get("kite_oauth_consumed_at"))
+        st.write("kite_oauth_in_progress:", st.session_state.get("kite_oauth_in_progress"))
+
+        if st.button("🔄 Reset OAuth State", type="secondary"):
+            st.session_state.kite_oauth_consumed = False
+            st.session_state.kite_oauth_consumed_at = 0.0
+            st.session_state.kite_oauth_in_progress = False
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            try:
+                st.experimental_set_query_params()
+            except Exception:
+                pass
+            st.success("OAuth state cleared. Please click Login again.")
+            st.rerun()
+
     st.markdown("---")
-    st.markdown("<div style='text-align:center; color: #6b7280;'>Enhanced Intraday Terminal Pro with Full Stock Scanning & High-Quality Signal Filters</div>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align:center; color: #6b7280;'>Enhanced Intraday Terminal Pro with Full Stock Scanning & High-Quality Signal Filters | Integrated with Kite Connect</div>", unsafe_allow_html=True)
 
 except Exception as e:
     st.error(f"Application error: {str(e)}")
