@@ -1,4 +1,3 @@
-
 # Rantv Intraday Trading Signals & Market Analysis - PRODUCTION READY
 # ENHANCED VERSION WITH FULL STOCK SCANNING & BETTER SIGNAL QUALITY
 # UPDATED: Lowered confidence to 70%, score to 6, added ADX trend filter, optimized for peak hours
@@ -2709,4 +2708,3 @@ except Exception as e:
     st.info("Please refresh the page and try again")
     logger.error(f"Application crash: {e}")
     st.code(traceback.format_exc())
-
