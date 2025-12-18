@@ -33,11 +33,9 @@ logger = logging.getLogger("RantvIntegrated")
 IND_TZ = pytz.timezone("Asia/Kolkata")
 warnings.filterwarnings('ignore')
 
-# Kite Credentials (Use Env Variables for Security)
 KITE_API_KEY = os.environ.get("KITE_API_KEY", "pwnmsnpy30s4uotu")
 KITE_API_SECRET = os.environ.get("KITE_API_SECRET", "m44rfdl9ligc4ctaq7r9sxkxpgnfm30m")
 
-# Trading Constraints
 CAPITAL = 2_000_000.0
 TRADE_ALLOC = 0.15
 MAX_DAILY_TRADES = 10
@@ -78,9 +76,7 @@ class AlgoOrder:
 # =================================================================
 
 class AlgoEngine:
-    """
-    Background thread that monitors for signals and manages automated execution.
-    """
+    """Background thread for automated signal monitoring and execution."""
     def __init__(self, trader):
         self.state = AlgoState.STOPPED
         self.trader = trader
@@ -99,7 +95,7 @@ class AlgoEngine:
                 self._stop_event.clear()
                 self._scheduler_thread = threading.Thread(target=self._run_engine_loop, daemon=True)
                 self._scheduler_thread.start()
-                logger.info("AlgoEngine: Started.")
+                logger.info("AlgoEngine: Thread started.")
                 return True
         return False
 
@@ -107,7 +103,6 @@ class AlgoEngine:
         with self._lock:
             self.state = AlgoState.STOPPED
             self._stop_event.set()
-            logger.info("AlgoEngine: Stopped.")
 
     def _run_engine_loop(self):
         last_scan_time = 0
@@ -116,11 +111,9 @@ class AlgoEngine:
                 if self.state == AlgoState.RUNNING:
                     now = time.time()
                     if self._is_market_open():
-                        # Scan every 60 seconds
                         if now - last_scan_time > 60:
                             self._scan_and_execute()
                             last_scan_time = now
-                        # Check risk every 5 seconds
                         self._check_risk_breaches()
                 time.sleep(5)
             except Exception as e:
@@ -135,7 +128,7 @@ class AlgoEngine:
         if len(self.active_positions) >= self.max_positions:
             return
 
-        # Use the trader's existing signal generation logic
+        # Core logic: Scanning using existing MultiStrategyIntradayTrader methods
         signals = self.trader.generate_quality_signals(
             universe="All Stocks",
             min_confidence=self.min_confidence,
@@ -153,7 +146,7 @@ class AlgoEngine:
         qty = int((CAPITAL * TRADE_ALLOC) / signal["entry"])
         if qty <= 0: return
 
-        # Execute through the main Trader object to ensure Kite/Risk sync
+        # Execute through trader object
         success, msg = self.trader.execute_trade(
             symbol=signal["symbol"],
             action=signal["action"],
@@ -166,7 +159,7 @@ class AlgoEngine:
         )
 
         if success:
-            order = AlgoOrder(
+            self.active_positions[signal["symbol"]] = AlgoOrder(
                 order_id=f"AUTO_{int(time.time())}",
                 symbol=signal["symbol"],
                 action=signal["action"],
@@ -178,76 +171,66 @@ class AlgoEngine:
                 confidence=signal["confidence"],
                 status=OrderStatus.FILLED
             )
-            self.active_positions[signal["symbol"]] = order
 
     def _check_risk_breaches(self):
         perf = self.trader.get_performance_stats()
         if perf.get('total_pnl', 0) < -self.daily_loss_limit:
             self.state = AlgoState.EMERGENCY_STOP
-            logger.critical("ALGO: Daily Loss Limit Breached. Halting Engine.")
+            logger.critical("ALGO: Loss Limit Breached.")
 
 # =================================================================
-# 4. EXISTING CORE LOGIC (Integrated)
+# 4. INITIALIZATION & MAIN APP
 # =================================================================
 
-# [Placeholder for your existing MultiStrategyIntradayTrader, 
-# EnhancedDataManager, and AdvancedRiskManager classes from the original app.py]
-
-# =================================================================
-# 5. STREAMLIT UI & TAB MANAGEMENT
-# =================================================================
+def initialize_application():
+    """Initializes and persists Trader, DataManager, and AlgoEngine."""
+    if "data_manager" not in st.session_state:
+        # These classes are defined in your original app.py
+        # data_manager = EnhancedDataManager() 
+        # trader = MultiStrategyIntradayTrader()
+        
+        # Placeholder for instantiation (requires classes from your source)
+        # st.session_state.data_manager = data_manager
+        # st.session_state.trader = trader
+        # st.session_state.algo_engine = AlgoEngine(trader)
+        pass
+    
+    return st.session_state.get("data_manager"), st.session_state.get("trader")
 
 def main():
     st.set_page_config(page_title="Rantv Terminal Pro", layout="wide")
     
-    # CSS Inject for consistent styling
+    # Custom CSS for UI styling
     st.markdown("""<style>.stApp { background-color: #fff9e6; }</style>""", unsafe_allow_html=True)
 
-    # Persistence of stateful objects
-    if "trader" not in st.session_state:
-        # trader = MultiStrategyIntradayTrader()
-        # st.session_state.trader = trader
-        # st.session_state.algo_engine = AlgoEngine(trader)
-        st.error("Please initialize your core Trader classes here.")
+    data_manager, trader = initialize_application()
+
+    if not trader:
+        st.error("Application initialization failed. Ensure core classes are loaded.")
         return
 
-    trader = st.session_state.trader
     engine = st.session_state.algo_engine
-
     st.title("🚀 Rantv Intraday Terminal Pro")
     st_autorefresh(interval=PRICE_REFRESH_MS, key="global_refresh")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Market Data", "🤖 Algo Engine", "📑 Trade History", "⚙️ Settings"])
-
-    with tab1:
-        st.subheader("Live Market Signals")
-        # Existing code for signal generation tables and manual trade buttons
-        # ...
+    tab1, tab2, tab3 = st.tabs(["📊 Market Data", "🤖 Algo Engine", "📑 Analytics"])
 
     with tab2:
         st.subheader("Autonomous Trading Control")
         col1, col2, col3 = st.columns(3)
         
-        status = "🟢 RUNNING" if engine.state == AlgoState.RUNNING else "🔴 STOPPED"
-        col1.metric("Engine Status", status)
-        col2.metric("Active Algo Positions", len(engine.active_positions))
-        col3.metric("Daily Profit/Loss", f"₹{trader.get_performance_stats()['total_pnl']:.2f}")
+        status_text = "🟢 RUNNING" if engine.state == AlgoState.RUNNING else "🔴 STOPPED"
+        col1.metric("Engine Status", status_text)
+        col2.metric("Active Trades", len(engine.active_positions))
+        col3.metric("PnL Today", f"₹{trader.get_performance_stats()['total_pnl']:.2f}")
 
-        c1, c2, c3 = st.columns(3)
-        if c1.button("START ENGINE", type="primary", use_container_width=True):
+        if st.button("START ENGINE", type="primary"):
             engine.start()
             st.rerun()
-        if c2.button("STOP ENGINE", use_container_width=True):
+        
+        if st.button("STOP ENGINE"):
             engine.stop()
             st.rerun()
-        if c3.button("FORCE CLOSE ALL", type="secondary", use_container_width=True):
-            # trader.close_all_positions()
-            st.warning("All automated trades closed.")
-
-    with tab3:
-        st.subheader("Unified Trade Log")
-        # Render both manual and algo trades here
-        # ...
 
 if __name__ == "__main__":
     main()
