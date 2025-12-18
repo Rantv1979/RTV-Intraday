@@ -66,8 +66,8 @@ class AppConfig:
     """Centralized configuration for the entire application"""
     
     # API Credentials
-    KITE_API_KEY: str = os.environ.get("KITE_API_KEY", "pwnmsnpy30s4uotu")
-    KITE_API_SECRET: str = os.environ.get("KITE_API_SECRET", "m44rfdl9ligc4ctaq7r9sxkxpgnfm30m")
+    KITE_API_KEY: str = os.environ.get("KITE_API_KEY", "np4vpl4wq4yez03u")
+    KITE_API_SECRET: str = os.environ.get("KITE_API_SECRET", "hqorfq94c0qupc9gvjqps8tdsr0kfa86")
     
     # Trading Parameters
     CAPITAL: float = 2_000_000.0
