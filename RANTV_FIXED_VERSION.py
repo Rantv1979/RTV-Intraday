@@ -1416,8 +1416,8 @@ import time
 
 class KiteConnectManager:
     def __init__(self, api_key, api_secret):
-        self.api_key = api_key or ""
-        self.api_secret = api_secret or ""
+        self.api_key = api_key or "np4vpl4wq4yez03u"
+        self.api_secret = api_secret or "hqorfq94c0qupc9gvjqps8tdsr0kfa86"
         self.kite = None
         self.kws = None
         self.access_token = None
