@@ -1573,23 +1573,29 @@ class KiteConnectManager:
         an OAuth round-trip.
         """
         try:
-            if not self.api_key or not self.api_secret:
-                st.warning("Kite API Key not configured. Set KITE_API_KEY and KITE_API_SECRET in environment secrets.")
-                return False
-
-            if not self.kite:
+            # Initialize KiteConnect if needed
+            if not self.kite and (self.api_key and self.api_secret):
                 self.kite = KiteConnect(api_key=self.api_key)
+            elif not self.kite:
+                # Create a dummy KiteConnect for token validation (without API key)
+                try:
+                    from kiteconnect import KiteConnect as KC
+                    self.kite = KC(api_key="DUMMY")
+                except:
+                    pass
 
-            # 1) Handle OAuth callback first
-            if not st.session_state.kite_oauth_in_progress and self.check_oauth_callback():
+            # 1) Handle OAuth callback first (only if we have API credentials)
+            if self.api_key and self.api_secret and not st.session_state.kite_oauth_in_progress and self.check_oauth_callback():
                 return True
 
             # 2) Session token check
             if "kite_access_token" in st.session_state:
                 self.access_token = st.session_state.kite_access_token
-                self.kite.set_access_token(self.access_token)
+                if self.kite:
+                    self.kite.set_access_token(self.access_token)
                 try:
-                    _ = self.kite.profile()
+                    if self.kite:
+                        _ = self.kite.profile()
                     self.is_authenticated = True
                     return True
                 except Exception:
@@ -1599,12 +1605,14 @@ class KiteConnectManager:
             db_token = kite_token_db.get_valid_token() if kite_token_db else None
             if db_token:
                 self.access_token = db_token["access_token"]
-                self.kite.set_access_token(self.access_token)
+                if self.kite:
+                    self.kite.set_access_token(self.access_token)
                 try:
-                    profile = self.kite.profile()
+                    if self.kite:
+                        profile = self.kite.profile()
                     self.is_authenticated = True
                     st.session_state.kite_access_token = self.access_token
-                    st.session_state.kite_user_name = profile.get("user_name", "")
+                    st.session_state.kite_user_name = db_token.get("user_name", "")
                     return True
                 except Exception:
                     try:
@@ -1617,23 +1625,33 @@ class KiteConnectManager:
                 st.info("Completing authentication…")
                 return False
 
-            st.info("Kite Connect authentication required for live charts.")
-            login_url = self.kite.login_url()
+            st.info("🔐 Kite Connect Authentication Required")
+            
+            # Show OAuth option only if API credentials are configured
+            if self.api_key and self.api_secret:
+                try:
+                    login_url = self.kite.login_url()
+                    st.link_button("🔐 Login with Kite OAuth", login_url, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"OAuth login unavailable: {e}")
+            else:
+                st.warning("⚠️ Kite API credentials not configured. Set KITE_API_KEY and KITE_API_SECRET in environment secrets for OAuth login.")
 
-            # NOTE: Using a simple link is less brittle on Cloud
-            st.link_button("🔐 Login with Kite", login_url, use_container_width=True)
-
-            st.markdown("**Or enter access token manually:**")
+            # Always show manual token entry as fallback
+            st.markdown("**Enter access token manually:**")
             with st.form("kite_login_form"):
-                access_token = st.text_input("Access Token", type="password", help="Paste your access token from Kite Connect")
-                submit = st.form_submit_button("Authenticate", type="primary")
+                access_token = st.text_input("Access Token", type="password", help="Get your access token from Kite Connect dashboard")
+                submit = st.form_submit_button("Authenticate", type="primary", use_container_width=True)
 
             if submit and access_token:
                 try:
                     self.access_token = access_token
-                    self.kite.set_access_token(self.access_token)
-                    profile = self.kite.profile()
-                    user_name = profile.get("user_name", "")
+                    if self.kite:
+                        self.kite.set_access_token(self.access_token)
+                        profile = self.kite.profile()
+                        user_name = profile.get("user_name", "")
+                    else:
+                        user_name = "User"
                     st.session_state.kite_access_token = self.access_token
                     st.session_state.kite_user_name = user_name
                     try:
@@ -1641,10 +1659,11 @@ class KiteConnectManager:
                     except Exception:
                         pass
                     self.is_authenticated = True
-                    st.success(f"Authenticated as {user_name}")
+                    st.success(f"✅ Authenticated as {user_name}")
+                    st.balloons()
                     return True
                 except Exception as e:
-                    st.error(f"Authentication failed: {str(e)}")
+                    st.error(f"❌ Authentication failed: {str(e)}")
                     return False
 
             return False
