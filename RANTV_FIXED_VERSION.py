@@ -13,10 +13,16 @@ from enum import Enum
 import logging
 import json
 import pytz
-from kiteconnect import KiteConnect
 
-kite = KiteConnect(api_key=os.getenv('KITE_API_KEY'))
-print(kite.login_url())
+from kiteconnect import KiteConnect
+import os
+
+# Initialize with your API key
+kite = KiteConnect(api_key="your_api_key")
+
+# Generate login URL
+login_url = kite.login_url()
+print(f"Login URL: {login_url}")
 # Use the URL to login and get request_token
 logger = logging.getLogger(__name__)
 
