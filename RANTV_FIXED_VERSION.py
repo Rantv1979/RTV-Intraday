@@ -1,7 +1,7 @@
 """
 Algo Trading Engine for Rantv Intraday Terminal Pro
 Provides automated order execution, scheduling, and risk management
-Enhanced with High Accuracy Strategies, Live Market Data, and Advanced Risk Management
+Enhanced with Kite Live Charts, Algo Trading, and High Accuracy Strategies
 """
 
 # ===================== PART 1: IMPORTS AND CONFIGURATION =====================
@@ -17,7 +17,7 @@ import pytz
 import traceback
 from datetime import datetime, timedelta, time as dt_time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Tuple
 from enum import Enum
 
 import streamlit as st
@@ -28,6 +28,7 @@ import yfinance as yf
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 import warnings
+import re
 
 # Auto-install missing dependencies
 def install_package(package_name):
@@ -49,7 +50,6 @@ except ImportError:
     if install_package("kiteconnect"):
         from kiteconnect import KiteConnect, KiteTicker
         KITECONNECT_AVAILABLE = True
-        st.success("✅ Installed kiteconnect")
 
 try:
     import sqlalchemy
@@ -60,7 +60,6 @@ except ImportError:
         import sqlalchemy
         from sqlalchemy import create_engine, text
         SQLALCHEMY_AVAILABLE = True
-        st.success("✅ Installed sqlalchemy")
 
 try:
     import joblib
@@ -69,7 +68,6 @@ except ImportError:
     if install_package("joblib"):
         import joblib
         JOBLIB_AVAILABLE = True
-        st.success("✅ Installed joblib")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -419,6 +417,31 @@ st.markdown("""
         margin: 8px 0;
         border-left: 4px solid #f59e0b;
     }
+    
+    /* Algo Trading Styles */
+    .algo-status-running {
+        background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+        border-left: 4px solid #059669;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 10px 0;
+    }
+    
+    .algo-status-stopped {
+        background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+        border-left: 4px solid #dc2626;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 10px 0;
+    }
+    
+    .algo-status-paused {
+        background: linear-gradient(135deg, #ffe8cc 0%, #ffd9a6 100%);
+        border-left: 4px solid #ff8c00;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 10px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -435,6 +458,11 @@ if 'kite_oauth_consumed' not in st.session_state: st.session_state.kite_oauth_co
 if 'kite_oauth_consumed_at' not in st.session_state: st.session_state.kite_oauth_consumed_at = 0.0
 if 'kite_access_token' not in st.session_state: st.session_state.kite_access_token = None
 if 'kite_user_name' not in st.session_state: st.session_state.kite_user_name = ""
+if 'algo_engine' not in st.session_state: st.session_state.algo_engine = None
+if 'api_key_input' not in st.session_state: st.session_state.api_key_input = ""
+if 'api_secret_input' not in st.session_state: st.session_state.api_secret_input = ""
+if 'request_token_input' not in st.session_state: st.session_state.request_token_input = ""
+if 'login_url_generated' not in st.session_state: st.session_state.login_url_generated = None
 
 # ===================== PART 4: UTILITY FUNCTIONS =====================
 def now_indian():
@@ -484,14 +512,6 @@ def calculate_atr(high, low, close, period=14):
     tr3 = (low - close.shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.rolling(period).mean()
-
-def stochastic(high, low, close, k_period=14, d_period=3):
-    lowest_low = low.rolling(window=k_period).min()
-    highest_high = high.rolling(window=k_period).max()
-    denom = (highest_high - lowest_low).replace(0, np.nan)
-    k = 100 * (close - lowest_low) / denom
-    d = k.rolling(window=d_period).mean()
-    return k.fillna(50), d.fillna(50)
 
 def macd(close, fast=12, slow=26, signal=9):
     ema_fast = ema(close, fast)
@@ -597,20 +617,6 @@ class KiteConnectManager:
             st.experimental_set_query_params()
         except Exception:
             pass
-        try:
-            st.markdown(
-                """
-                <script>
-                if (window && window.history && window.location && window.location.pathname) {
-                    const cleanUrl = window.location.origin + window.location.pathname;
-                    window.history.replaceState({}, document.title, cleanUrl);
-                }
-                </script>
-                """,
-                unsafe_allow_html=True
-            )
-        except Exception:
-            pass
 
     def check_oauth_callback(self) -> bool:
         """Check if URL contains request_token and exchange it"""
@@ -664,10 +670,10 @@ class KiteConnectManager:
 
             self._clear_query_params()
 
-            st.toast("✅ Authenticated with Kite. Finalizing...", icon="✅")
-            time.sleep(0.3)
-
+            st.success(f"✅ Authenticated as {data.get('user_name', 'User')}")
+            st.balloons()
             st.session_state.kite_oauth_in_progress = False
+            time.sleep(1)
             st.rerun()
             return True
 
@@ -678,82 +684,83 @@ class KiteConnectManager:
             st.error(f"Token exchange failed: {str(e)}")
             return False
 
-    def login(self) -> bool:
-        """Render the login UI"""
+    def get_login_url(self) -> Optional[str]:
+        """Get Kite login URL"""
         try:
-            if not self.kite and (self.api_key and self.api_secret):
+            if not self.api_key:
+                return None
+            if not self.kite:
                 self.kite = KiteConnect(api_key=self.api_key)
-            elif not self.kite:
-                try:
-                    from kiteconnect import KiteConnect as KC
-                    self.kite = KC(api_key="DUMMY")
-                except:
-                    pass
-
-            # Handle OAuth callback first
-            if self.api_key and self.api_secret and not st.session_state.kite_oauth_in_progress and self.check_oauth_callback():
-                return True
-
-            # Session token check
-            if "kite_access_token" in st.session_state:
-                self.access_token = st.session_state.kite_access_token
-                if self.kite:
-                    self.kite.set_access_token(self.access_token)
-                try:
-                    if self.kite:
-                        _ = self.kite.profile()
-                    self.is_authenticated = True
-                    return True
-                except Exception:
-                    del st.session_state["kite_access_token"]
-
-            # Render login UI if not mid-flow
-            if st.session_state.kite_oauth_in_progress:
-                st.info("Completing authentication…")
-                return False
-
-            st.info("🔐 Kite Connect Authentication Required")
-            
-            if self.api_key and self.api_secret:
-                try:
-                    login_url = self.kite.login_url()
-                    st.link_button("🔓 Login with Kite OAuth", login_url, use_container_width=True)
-                except Exception as e:
-                    st.warning(f"OAuth login unavailable: {e}")
-            else:
-                st.warning("⚠️ Kite API credentials not configured.")
-
-            # Manual token entry
-            st.markdown("**Enter access token manually:**")
-            with st.form("kite_login_form"):
-                access_token = st.text_input("Access Token", type="password", 
-                                            help="Get your access token from Kite Connect dashboard")
-                submit = st.form_submit_button("Authenticate", type="primary", use_container_width=True)
-
-            if submit and access_token:
-                try:
-                    self.access_token = access_token
-                    if self.kite:
-                        self.kite.set_access_token(self.access_token)
-                        profile = self.kite.profile()
-                        user_name = profile.get("user_name", "")
-                    else:
-                        user_name = "User"
-                    st.session_state.kite_access_token = self.access_token
-                    st.session_state.kite_user_name = user_name
-                    self.is_authenticated = True
-                    st.success(f"✅ Authenticated as {user_name}")
-                    st.balloons()
-                    return True
-                except Exception as e:
-                    st.error(f"❌ Authentication failed: {str(e)}")
-                    return False
-
-            return False
-
+            return self.kite.login_url()
         except Exception as e:
-            st.error(f"Kite Connect login error: {str(e)}")
-            return False
+            logger.error(f"Error getting login URL: {e}")
+            return None
+
+    def login_ui(self):
+        """Render Kite login UI in sidebar"""
+        with st.sidebar:
+            st.title("🔐 Kite Connect Login")
+            
+            # Check for OAuth callback
+            if self.api_key and self.api_secret and not st.session_state.kite_oauth_in_progress:
+                self.check_oauth_callback()
+            
+            # If already authenticated, show user info
+            if self.is_authenticated:
+                st.success(f"✅ Authenticated as {st.session_state.get('kite_user_name', 'User')}")
+                if st.button("🔓 Logout", key="kite_logout_btn"):
+                    if self.logout():
+                        st.success("Logged out successfully")
+                        st.rerun()
+                return
+            
+            # Show login form
+            st.info("Enter Kite Connect credentials to access live charts")
+            
+            api_key = st.text_input("API Key", value=st.session_state.get("api_key_input", ""), 
+                                   type="password", key="kite_api_key_input")
+            api_secret = st.text_input("API Secret", value=st.session_state.get("api_secret_input", ""), 
+                                      type="password", key="kite_api_secret_input")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("Generate Login URL", type="primary", key="generate_login_url_btn"):
+                    if api_key:
+                        st.session_state.api_key_input = api_key
+                        st.session_state.api_secret_input = api_secret
+                        self.api_key = api_key
+                        self.api_secret = api_secret
+                        
+                        login_url = self.get_login_url()
+                        if login_url:
+                            st.session_state.login_url_generated = login_url
+                            st.success("Login URL generated! Click the link below:")
+                            st.markdown(f"[🔗 Click here to login to Kite]({login_url})")
+                            st.code(login_url)
+                            
+                            # Try to open browser automatically
+                            try:
+                                webbrowser.open(login_url, new=2)
+                                st.info("Browser opened automatically. If not, click the link above.")
+                            except:
+                                st.info("Please copy the URL above and open in your browser.")
+                        else:
+                            st.error("Failed to generate login URL. Check API key.")
+                    else:
+                        st.error("Please enter API Key")
+            
+            with col2:
+                st.markdown("**Or enter token manually:**")
+                request_token = st.text_input("Request Token", key="kite_request_token_input")
+                
+                if st.button("Complete Authentication", key="complete_auth_btn"):
+                    if api_key and api_secret and request_token:
+                        success = self.exchange_request_token(request_token)
+                        if success:
+                            st.rerun()
+                    else:
+                        st.error("Please fill all fields")
 
     def logout(self):
         try:
@@ -771,7 +778,202 @@ class KiteConnectManager:
             logger.error(f"Logout error: {e}")
             return False
 
-# ===================== PART 6: DATA MANAGER =====================
+    def get_historical_data(self, instrument_token, interval="minute", days=7):
+        """Get historical data from Kite"""
+        if not self.is_authenticated or not self.kite:
+            return None
+        
+        try:
+            from_date = datetime.now().date() - timedelta(days=days)
+            to_date = datetime.now().date()
+            
+            data = self.kite.historical_data(
+                instrument_token=instrument_token,
+                from_date=from_date.strftime("%Y-%m-%d"),
+                to_date=to_date.strftime("%Y-%m-%d"),
+                interval=interval,
+                continuous=False,
+                oi=False
+            )
+            
+            if data:
+                df = pd.DataFrame(data)
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                return df
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching historical data: {e}")
+            return None
+
+# ===================== PART 6: ALGO TRADING ENGINE =====================
+class AlgoState(Enum):
+    STOPPED = "stopped"
+    RUNNING = "running"
+    PAUSED = "paused"
+    EMERGENCY_STOP = "emergency_stop"
+
+class OrderStatus(Enum):
+    PENDING = "pending"
+    PLACED = "placed"
+    FILLED = "filled"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
+
+@dataclass
+class AlgoOrder:
+    order_id: str
+    symbol: str
+    action: str
+    quantity: int
+    price: float
+    stop_loss: float
+    target: float
+    strategy: str
+    confidence: float
+    status: OrderStatus = OrderStatus.PENDING
+    placed_at: Optional[datetime] = None
+    filled_at: Optional[datetime] = None
+    filled_price: Optional[float] = None
+    error_message: Optional[str] = None
+
+@dataclass
+class RiskLimits:
+    max_positions: int = 5
+    max_daily_loss: float = 50000.0
+    max_position_size: float = 100000.0
+    min_confidence: float = 0.70
+    max_trades_per_day: int = 10
+    max_trades_per_stock: int = 2
+
+@dataclass
+class AlgoStats:
+    total_orders: int = 0
+    filled_orders: int = 0
+    rejected_orders: int = 0
+    total_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    win_count: int = 0
+    loss_count: int = 0
+    daily_loss: float = 0.0
+    trades_today: int = 0
+
+class AlgoEngine:
+    """Algorithmic Trading Engine"""
+    
+    def __init__(self, trader=None):
+        self.state = AlgoState.STOPPED
+        self.trader = trader
+        self.risk_limits = RiskLimits()
+        self.stats = AlgoStats()
+        self.orders: Dict[str, AlgoOrder] = {}
+        self.active_positions: Dict[str, AlgoOrder] = {}
+        self.order_history: List[AlgoOrder] = []
+        
+        self._stop_event = threading.Event()
+        self._scheduler_thread = None
+        self._lock = threading.Lock()
+        
+        logger.info("AlgoEngine initialized")
+    
+    def start(self) -> bool:
+        if self.state == AlgoState.RUNNING:
+            return False
+        
+        self.state = AlgoState.RUNNING
+        self._stop_event.clear()
+        
+        self._scheduler_thread = threading.Thread(target=self._run_scheduler, daemon=True)
+        self._scheduler_thread.start()
+        
+        logger.info("AlgoEngine started")
+        return True
+    
+    def stop(self):
+        logger.info("Stopping AlgoEngine...")
+        self.state = AlgoState.STOPPED
+        self._stop_event.set()
+        
+        if self._scheduler_thread:
+            self._scheduler_thread.join(timeout=5)
+        
+        logger.info("AlgoEngine stopped")
+    
+    def pause(self):
+        self.state = AlgoState.PAUSED
+        logger.info("AlgoEngine paused")
+    
+    def resume(self):
+        if self.state == AlgoState.PAUSED:
+            self.state = AlgoState.RUNNING
+            logger.info("AlgoEngine resumed")
+    
+    def emergency_stop(self, reason: str = "Manual trigger"):
+        logger.critical(f"EMERGENCY STOP: {reason}")
+        self.state = AlgoState.EMERGENCY_STOP
+        self._stop_event.set()
+    
+    def _run_scheduler(self):
+        logger.info("Algo scheduler thread started")
+        
+        while not self._stop_event.is_set():
+            try:
+                if self.state != AlgoState.RUNNING:
+                    time.sleep(1)
+                    continue
+                
+                # Check market hours
+                if not market_open():
+                    time.sleep(10)
+                    continue
+                
+                # Update positions P&L
+                if self.trader:
+                    self.trader.update_positions_pnl()
+                
+                # Check risk limits
+                self._check_risk_limits()
+                
+                time.sleep(5)
+                
+            except Exception as e:
+                logger.error(f"Scheduler error: {e}")
+                time.sleep(10)
+        
+        logger.info("Algo scheduler thread stopped")
+    
+    def _check_risk_limits(self):
+        """Check if risk limits are breached"""
+        if not self.trader:
+            return
+        
+        # Calculate current P&L
+        total_pnl = sum([p.get('current_pnl', 0) for p in self.trader.positions.values()])
+        
+        # Check daily loss limit
+        if total_pnl < -self.risk_limits.max_daily_loss:
+            self.emergency_stop(f"Daily loss limit exceeded: ₹{total_pnl:.2f}")
+    
+    def get_status(self) -> dict:
+        return {
+            "state": self.state.value,
+            "active_positions": len(self.active_positions),
+            "total_orders": self.stats.total_orders,
+            "filled_orders": self.stats.filled_orders,
+            "trades_today": self.stats.trades_today,
+            "realized_pnl": self.stats.realized_pnl,
+            "unrealized_pnl": self.stats.unrealized_pnl,
+            "daily_loss": self.stats.daily_loss
+        }
+    
+    def update_risk_limits(self, **kwargs):
+        for key, value in kwargs.items():
+            if hasattr(self.risk_limits, key):
+                setattr(self.risk_limits, key, value)
+                logger.info(f"Updated risk limit: {key} = {value}")
+
+# ===================== PART 7: DATA MANAGER =====================
 class EnhancedDataManager:
     def __init__(self):
         self.price_cache = {}
@@ -848,18 +1050,15 @@ class EnhancedDataManager:
         df["ATR"] = calculate_atr(df["High"], df["Low"], df["Close"]).fillna(method="ffill").fillna(0)
         df["MACD"], df["MACD_Signal"], df["MACD_Hist"] = macd(df["Close"])
         df["BB_Upper"], df["BB_Middle"], df["BB_Lower"] = bollinger_bands(df["Close"])
-        df["Stoch_K"], df["Stoch_D"] = stochastic(df["High"], df["Low"], df["Close"])
         df["VWAP"] = (((df["High"] + df["Low"] + df["Close"]) / 3) * df["Volume"]).cumsum() / df["Volume"].cumsum()
         
         sr = calculate_support_resistance_advanced(df["High"], df["Low"], df["Close"])
         df["Support"] = sr["support"]
         df["Resistance"] = sr["resistance"]
         
-        df["ADX"] = 25  # Placeholder for ADX
-        
         return df
 
-# ===================== PART 7: TRADING ENGINE =====================
+# ===================== PART 8: TRADING ENGINE =====================
 class MultiStrategyIntradayTrader:
     def __init__(self, capital=CAPITAL):
         self.initial_capital = float(capital)
@@ -1094,7 +1293,440 @@ class MultiStrategyIntradayTrader:
                 continue
         return out
 
-# ===================== PART 8: MAIN APPLICATION UI =====================
+# ===================== PART 9: KITE LIVE CHARTS =====================
+def create_kite_live_charts(kite_manager):
+    """Create Kite Connect Live Charts Tab"""
+    st.subheader("📈 Kite Connect Live Charts")
+    
+    if not kite_manager.is_authenticated:
+        st.info("Please authenticate with Kite Connect in the sidebar to view live charts")
+        return
+    
+    st.success(f"✅ Authenticated as {st.session_state.get('kite_user_name', 'User')}")
+    
+    # Index mapping
+    INDEX_MAP = {
+        "NIFTY 50": {"token": 256265, "symbol": "NSE:NIFTY 50"},
+        "BANK NIFTY": {"token": 260105, "symbol": "NSE:NIFTY BANK"},
+        "FIN NIFTY": {"token": 257801, "symbol": "NSE:NIFTY FIN SERVICE"},
+        "SENSEX": {"token": 265, "symbol": "BSE:SENSEX"}
+    }
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        selected_index = st.selectbox("Select Index", list(INDEX_MAP.keys()), key="chart_index_select")
+    
+    with col2:
+        interval = st.selectbox("Interval", ["minute", "5minute", "15minute", "30minute", "60minute", "day"], 
+                               key="chart_interval_select")
+    
+    with col3:
+        days_back = st.slider("Days Back", 1, 30, 7, key="chart_days_slider")
+    
+    if st.button("📊 Load Live Chart", type="primary", key="load_chart_btn"):
+        try:
+            index_info = INDEX_MAP[selected_index]
+            with st.spinner(f"Fetching {selected_index} data..."):
+                # Try to get data from Kite
+                data = kite_manager.get_historical_data(index_info["token"], interval, days_back)
+                
+                if data is not None and len(data) > 0:
+                    # Create candlestick chart
+                    fig = go.Figure(data=[go.Candlestick(
+                        x=data.index,
+                        open=data['open'],
+                        high=data['high'],
+                        low=data['low'],
+                        close=data['close'],
+                        name=selected_index
+                    )])
+                    
+                    # Add moving averages
+                    data['SMA20'] = data['close'].rolling(window=20).mean()
+                    data['SMA50'] = data['close'].rolling(window=50).mean()
+                    
+                    fig.add_trace(go.Scatter(
+                        x=data.index,
+                        y=data['SMA20'],
+                        mode='lines',
+                        name='SMA 20',
+                        line=dict(color='orange', width=1)
+                    ))
+                    
+                    fig.add_trace(go.Scatter(
+                        x=data.index,
+                        y=data['SMA50'],
+                        mode='lines',
+                        name='SMA 50',
+                        line=dict(color='blue', width=1)
+                    ))
+                    
+                    fig.update_layout(
+                        title=f'{selected_index} Live Chart ({interval})',
+                        xaxis_title='Date',
+                        yaxis_title='Price (₹)',
+                        height=500,
+                        template='plotly_white',
+                        showlegend=True
+                    )
+                    
+                    fig.update_xaxes(
+                        rangeslider_visible=False,
+                        rangeselector=dict(
+                            buttons=list([
+                                dict(count=1, label="1D", step="day", stepmode="backward"),
+                                dict(count=7, label="1W", step="day", stepmode="backward"),
+                                dict(count=1, label="1M", step="month", stepmode="backward"),
+                                dict(count=3, label="3M", step="month", stepmode="backward"),
+                                dict(step="all")
+                            ])
+                        )
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Show current stats
+                    current_price = data['close'].iloc[-1]
+                    prev_close = data['close'].iloc[-2] if len(data) > 1 else current_price
+                    change_pct = ((current_price - prev_close) / prev_close) * 100
+                    
+                    st.metric(f"Current {selected_index}", 
+                             f"₹{current_price:,.2f}", 
+                             f"{change_pct:+.2f}%")
+                    
+                    # Show additional stats
+                    cols = st.columns(4)
+                    cols[0].metric("Open", f"₹{data['open'].iloc[-1]:,.2f}")
+                    cols[1].metric("High", f"₹{data['high'].max():,.2f}")
+                    cols[2].metric("Low", f"₹{data['low'].min():,.2f}")
+                    cols[3].metric("Volume", f"{data['volume'].sum():,}")
+                    
+                    # Download button
+                    csv = data.to_csv()
+                    st.download_button(
+                        label="📥 Download CSV",
+                        data=csv,
+                        file_name=f"{selected_index}_{interval}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        key="download_chart_data"
+                    )
+                    
+                else:
+                    # Fallback to yfinance if Kite data not available
+                    st.info("Using yfinance data (Kite data unavailable)")
+                    ticker_map = {
+                        "NIFTY 50": "^NSEI",
+                        "BANK NIFTY": "^NSEBANK",
+                        "FIN NIFTY": "^NIFTY_FIN_SERVICE",
+                        "SENSEX": "^BSESN"
+                    }
+                    
+                    yf_ticker = ticker_map.get(selected_index, "^NSEI")
+                    period_map = {
+                        "minute": "1d", "5minute": "5d", "15minute": "7d",
+                        "30minute": "15d", "60minute": "30d", "day": f"{days_back}d"
+                    }
+                    
+                    df = yf.download(yf_ticker, period=period_map.get(interval, "7d"), 
+                                    interval=interval.replace("minute", "m").replace("60minute", "60m"))
+                    
+                    if not df.empty:
+                        fig = go.Figure(data=[go.Candlestick(
+                            x=df.index,
+                            open=df['Open'],
+                            high=df['High'],
+                            low=df['Low'],
+                            close=df['Close']
+                        )])
+                        
+                        fig.update_layout(
+                            title=f'{selected_index} Chart ({interval}) - via Yahoo Finance',
+                            height=500
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        current_price = df['Close'].iloc[-1]
+                        prev_close = df['Close'].iloc[-2] if len(df) > 1 else current_price
+                        change_pct = ((current_price - prev_close) / prev_close) * 100
+                        
+                        st.metric(f"Current {selected_index}", f"₹{current_price:,.2f}", f"{change_pct:+.2f}%")
+                    
+        except Exception as e:
+            st.error(f"Error loading chart: {str(e)}")
+    
+    # Stock selector for individual stocks
+    st.subheader("📊 Individual Stock Charts")
+    
+    stock_col1, stock_col2 = st.columns(2)
+    
+    with stock_col1:
+        selected_stock = st.selectbox("Select Stock", NIFTY_50[:20], key="stock_chart_select")
+    
+    with stock_col2:
+        stock_interval = st.selectbox("Chart Interval", ["15m", "30m", "1h", "1d"], key="stock_interval_select")
+    
+    if st.button("📈 Load Stock Chart", key="load_stock_chart_btn"):
+        try:
+            data_manager = EnhancedDataManager()
+            data = data_manager.get_stock_data(selected_stock, stock_interval)
+            
+            if data is not None and len(data) > 0:
+                fig = go.Figure(data=[go.Candlestick(
+                    x=data.index,
+                    open=data['Open'],
+                    high=data['High'],
+                    low=data['Low'],
+                    close=data['Close']
+                )])
+                
+                # Add indicators
+                fig.add_trace(go.Scatter(
+                    x=data.index,
+                    y=data['EMA8'],
+                    mode='lines',
+                    name='EMA 8',
+                    line=dict(color='orange', width=1)
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=data.index,
+                    y=data['EMA21'],
+                    mode='lines',
+                    name='EMA 21',
+                    line=dict(color='blue', width=1)
+                ))
+                
+                fig.update_layout(
+                    title=f'{selected_stock.replace(".NS", "")} Chart ({stock_interval})',
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Current stats
+                current_price = data['Close'].iloc[-1]
+                ema8 = data['EMA8'].iloc[-1]
+                ema21 = data['EMA21'].iloc[-1]
+                rsi_val = data['RSI14'].iloc[-1]
+                
+                cols = st.columns(4)
+                cols[0].metric("Price", f"₹{current_price:.2f}")
+                cols[1].metric("EMA 8", f"₹{ema8:.2f}")
+                cols[2].metric("EMA 21", f"₹{ema21:.2f}")
+                cols[3].metric("RSI", f"{rsi_val:.1f}")
+                
+        except Exception as e:
+            st.error(f"Error loading stock chart: {str(e)}")
+
+# ===================== PART 10: ALGO TRADING TAB =====================
+def create_algo_trading_tab(algo_engine):
+    """Create Algo Trading Control Tab"""
+    st.subheader("🤖 Algorithmic Trading Engine")
+    
+    if algo_engine is None:
+        st.warning("Algo Engine not initialized")
+        return
+    
+    status = algo_engine.get_status()
+    
+    # Status Display
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        state = status["state"]
+        if state == "running":
+            status_color = "🟢"
+            status_class = "algo-status-running"
+        elif state == "stopped":
+            status_color = "🔴"
+            status_class = "algo-status-stopped"
+        elif state == "paused":
+            status_color = "🟡"
+            status_class = "algo-status-paused"
+        else:
+            status_color = "⚫"
+            status_class = "algo-status-stopped"
+        
+        st.markdown(f"""
+        <div class="{status_class}">
+            <div style="font-size: 14px; color: #6b7280;">Engine Status</div>
+            <div style="font-size: 20px; font-weight: bold;">{status_color} {state.upper()}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.metric("Active Positions", status["active_positions"])
+    
+    with col3:
+        st.metric("Total Orders", status["total_orders"])
+    
+    with col4:
+        st.metric("Today's P&L", f"₹{status['realized_pnl'] + status['unrealized_pnl']:+.2f}")
+    
+    # Control Buttons
+    st.subheader("Engine Controls")
+    ctrl_cols = st.columns(5)
+    
+    with ctrl_cols[0]:
+        if st.button("▶️ Start Engine", type="primary", key="start_algo_btn", 
+                    disabled=status["state"] == "running"):
+            if algo_engine.start():
+                st.success("Algo Engine started!")
+                st.rerun()
+    
+    with ctrl_cols[1]:
+        if st.button("⏸️ Pause Engine", key="pause_algo_btn", 
+                    disabled=status["state"] != "running"):
+            algo_engine.pause()
+            st.info("Algo Engine paused")
+            st.rerun()
+    
+    with ctrl_cols[2]:
+        if st.button("▶️ Resume Engine", key="resume_algo_btn", 
+                    disabled=status["state"] != "paused"):
+            algo_engine.resume()
+            st.success("Algo Engine resumed")
+            st.rerun()
+    
+    with ctrl_cols[3]:
+        if st.button("⏹️ Stop Engine", key="stop_algo_btn", 
+                    disabled=status["state"] == "stopped"):
+            algo_engine.stop()
+            st.info("Algo Engine stopped")
+            st.rerun()
+    
+    with ctrl_cols[4]:
+        if st.button("🚨 Emergency Stop", type="secondary", key="emergency_stop_btn"):
+            algo_engine.emergency_stop("Manual emergency stop")
+            st.error("EMERGENCY STOP ACTIVATED")
+            st.rerun()
+    
+    # Risk Settings
+    st.subheader("Risk Management Settings")
+    
+    with st.expander("Configure Risk Limits", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            new_max_positions = st.number_input(
+                "Max Positions",
+                min_value=1, max_value=20,
+                value=algo_engine.risk_limits.max_positions,
+                key="algo_max_positions_input"
+            )
+            
+            new_max_daily_loss = st.number_input(
+                "Max Daily Loss (₹)",
+                min_value=1000, max_value=500000,
+                value=int(algo_engine.risk_limits.max_daily_loss),
+                key="algo_max_daily_loss_input"
+            )
+        
+        with col2:
+            new_min_confidence = st.slider(
+                "Min Signal Confidence",
+                min_value=0.5, max_value=0.99,
+                value=algo_engine.risk_limits.min_confidence,
+                step=0.01,
+                key="algo_min_confidence_slider"
+            )
+            
+            new_max_trades = st.number_input(
+                "Max Trades/Day",
+                min_value=1, max_value=50,
+                value=algo_engine.risk_limits.max_trades_per_day,
+                key="algo_max_trades_input"
+            )
+        
+        if st.button("Update Risk Settings", key="update_risk_settings_btn"):
+            algo_engine.update_risk_limits(
+                max_positions=new_max_positions,
+                max_daily_loss=float(new_max_daily_loss),
+                min_confidence=new_min_confidence,
+                max_trades_per_day=new_max_trades
+            )
+            st.success("Risk settings updated!")
+            st.rerun()
+    
+    # Performance Metrics
+    st.subheader("Performance Metrics")
+    perf_cols = st.columns(4)
+    
+    with perf_cols[0]:
+        st.metric("Filled Orders", status["filled_orders"])
+    
+    with perf_cols[1]:
+        st.metric("Rejected Orders", status.get("rejected_orders", 0))
+    
+    with perf_cols[2]:
+        st.metric("Realized P&L", f"₹{status['realized_pnl']:+.2f}")
+    
+    with perf_cols[3]:
+        st.metric("Unrealized P&L", f"₹{status['unrealized_pnl']:+.2f}")
+    
+    # Active Positions
+    if algo_engine.active_positions:
+        st.subheader("Active Algo Positions")
+        positions_data = []
+        for symbol, order in algo_engine.active_positions.items():
+            positions_data.append({
+                "Symbol": symbol.replace(".NS", ""),
+                "Action": order.action,
+                "Quantity": order.quantity,
+                "Entry Price": f"₹{order.price:.2f}",
+                "Current Price": f"₹{order.filled_price or order.price:.2f}",
+                "Stop Loss": f"₹{order.stop_loss:.2f}",
+                "Target": f"₹{order.target:.2f}",
+                "Strategy": order.strategy,
+                "Confidence": f"{order.confidence:.1%}"
+            })
+        
+        st.dataframe(pd.DataFrame(positions_data), use_container_width=True)
+    
+    # Strategy Configuration
+    st.subheader("Strategy Configuration")
+    
+    strategy_cols = st.columns(2)
+    
+    with strategy_cols[0]:
+        st.markdown("**High Accuracy Strategies**")
+        for strategy, config in HIGH_ACCURACY_STRATEGIES.items():
+            enabled = st.checkbox(config["name"], value=True, key=f"ha_{strategy}_checkbox")
+    
+    with strategy_cols[1]:
+        st.markdown("**Standard Strategies**")
+        for strategy, config in TRADING_STRATEGIES.items():
+            enabled = st.checkbox(config["name"], value=True, key=f"std_{strategy}_checkbox")
+    
+    # Market Conditions
+    st.subheader("Market Conditions")
+    
+    market_cols = st.columns(3)
+    
+    with market_cols[0]:
+        market_open_status = "🟢 OPEN" if market_open() else "🔴 CLOSED"
+        st.metric("Market Status", market_open_status)
+    
+    with market_cols[1]:
+        peak_hours_status = "🟢 PEAK" if is_peak_market_hours() else "⚪ OFF-PEAK"
+        st.metric("Peak Hours", peak_hours_status)
+    
+    with market_cols[2]:
+        st.metric("Trades Today", f"{status['trades_today']}/{algo_engine.risk_limits.max_trades_per_day}")
+    
+    # Info Box
+    st.markdown("---")
+    st.markdown("""
+    <div class="alert-warning">
+        <strong>⚠️ Important:</strong> Algorithmic trading involves significant risk. 
+        Always test with paper trading first. Set appropriate risk limits. 
+        Monitor the system regularly. Past performance does not guarantee future results.
+    </div>
+    """, unsafe_allow_html=True)
+
+# ===================== PART 11: MAIN APPLICATION =====================
 def main():
     # Display Logo and Header
     st.markdown("""
@@ -1105,7 +1737,7 @@ def main():
     """, unsafe_allow_html=True)
     
     st.markdown("<h2 style='text-align:center; color: #ff8c00;'>Intraday Terminal Pro - ENHANCED</h2>", unsafe_allow_html=True)
-    st.markdown("<h4 style='text-align:center; color: #6b7280;'>Full Stock Scanning & High-Quality Signal Generation</h4>", unsafe_allow_html=True)
+    st.markdown("<h4 style='text-align:center; color: #6b7280;'>Complete Trading Suite with Algo Engine & Live Charts</h4>", unsafe_allow_html=True)
     
     # Initialize components
     data_manager = EnhancedDataManager()
@@ -1120,66 +1752,20 @@ def main():
     
     kite_manager = st.session_state.kite_manager
     
+    if st.session_state.algo_engine is None:
+        st.session_state.algo_engine = AlgoEngine(trader=trader)
+    
+    algo_engine = st.session_state.algo_engine
+    
     # Auto-refresh
     st_autorefresh(interval=PRICE_REFRESH_MS, key="main_auto_refresh")
     st.session_state.refresh_count += 1
     
-    # Market Overview
-    st.subheader("📊 Market Overview")
-    cols = st.columns(7)
+    # Sidebar - Kite Login
+    kite_manager.login_ui()
     
-    try:
-        nifty = yf.Ticker("^NSEI")
-        nifty_price = nifty.history(period="1d")['Close'].iloc[-1]
-        cols[0].metric("NIFTY 50", f"₹{nifty_price:,.2f}")
-    except:
-        cols[0].metric("NIFTY 50", "Loading...")
-    
-    try:
-        bn = yf.Ticker("^NSEBANK")
-        bn_price = bn.history(period="1d")['Close'].iloc[-1]
-        cols[1].metric("BANK NIFTY", f"₹{bn_price:,.2f}")
-    except:
-        cols[1].metric("BANK NIFTY", "Loading...")
-    
-    cols[2].metric("Market Status", "LIVE" if market_open() else "CLOSED")
-    cols[3].metric("Market Regime", "🟢 TRENDING")
-    cols[4].metric("Peak Hours", f"{'🟢 YES' if is_peak_market_hours() else '🔴 NO'}")
-    cols[5].metric("Auto Trades", f"{trader.auto_trades_count}/{MAX_AUTO_TRADES}")
-    cols[6].metric("Available Cash", f"₹{trader.cash:,.0f}")
-    
-    # Market Mood Gauges
-    st.subheader("📊 Market Mood Gauges")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown(create_circular_market_mood_gauge("NIFTY 50", 22000, 0.15, 65), unsafe_allow_html=True)
-    with col2:
-        st.markdown(create_circular_market_mood_gauge("BANK NIFTY", 48000, 0.25, 70), unsafe_allow_html=True)
-    with col3:
-        market_status = "LIVE" if market_open() else "CLOSED"
-        status_sentiment = 80 if market_open() else 20
-        st.markdown(create_circular_market_mood_gauge("MARKET", 0, 0, status_sentiment).replace("₹0", market_status).replace("0.00%", ""), unsafe_allow_html=True)
-    with col4:
-        peak_hours_status = "PEAK" if is_peak_market_hours() else "OFF-PEAK"
-        peak_sentiment = 80 if is_peak_market_hours() else 30
-        st.markdown(create_circular_market_mood_gauge("PEAK HOURS", 0, 0, peak_sentiment).replace("₹0", "9:30AM-2:30PM").replace("0.00%", peak_hours_status), unsafe_allow_html=True)
-    
-    # Sidebar Configuration
+    # Sidebar - Trading Configuration
     with st.sidebar:
-        st.title("🔐 Kite Connect")
-        
-        if not kite_manager.is_authenticated:
-            st.info("Kite Connect authentication required for live charts")
-            if kite_manager.login():
-                st.rerun()
-        else:
-            st.success(f"✅ Authenticated as {st.session_state.get('kite_user_name', 'User')}")
-            if st.button("🔓 Logout", key="sidebar_logout_btn"):
-                if kite_manager.logout():
-                    st.success("Logged out successfully")
-                    st.rerun()
-        
         st.divider()
         st.header("⚙️ Trading Configuration")
         
@@ -1210,11 +1796,112 @@ def main():
         st.write(f"✅ Kite Connect: {'Available' if KITECONNECT_AVAILABLE else 'Not Available'}")
         st.write(f"✅ Database: {'Available' if SQLALCHEMY_AVAILABLE else 'Not Available'}")
         st.write(f"✅ ML Support: {'Available' if JOBLIB_AVAILABLE else 'Not Available'}")
+        st.write(f"✅ Algo Engine: {'Ready' if algo_engine else 'Not Initialized'}")
         st.write(f"🔄 Refresh Count: {st.session_state.refresh_count}")
+        st.write(f"📊 Market: {'Open' if market_open() else 'Closed'}")
+        st.write(f"⏰ Peak Hours: {'Active' if is_peak_market_hours() else 'Inactive'}")
     
-    # Main Tabs
+    # Market Overview
+    st.subheader("📊 Market Overview")
+    cols = st.columns(7)
+    
+    try:
+        nifty = yf.Ticker("^NSEI")
+        nifty_history = nifty.history(period="1d")
+        if not nifty_history.empty:
+            nifty_price = nifty_history['Close'].iloc[-1]
+            nifty_prev = nifty_history['Close'].iloc[-2] if len(nifty_history) > 1 else nifty_price
+            nifty_change = ((nifty_price - nifty_prev) / nifty_prev) * 100
+            cols[0].metric("NIFTY 50", f"₹{nifty_price:,.2f}", f"{nifty_change:+.2f}%")
+        else:
+            cols[0].metric("NIFTY 50", "Loading...")
+    except:
+        cols[0].metric("NIFTY 50", "Loading...")
+    
+    try:
+        bn = yf.Ticker("^NSEBANK")
+        bn_history = bn.history(period="1d")
+        if not bn_history.empty:
+            bn_price = bn_history['Close'].iloc[-1]
+            bn_prev = bn_history['Close'].iloc[-2] if len(bn_history) > 1 else bn_price
+            bn_change = ((bn_price - bn_prev) / bn_prev) * 100
+            cols[1].metric("BANK NIFTY", f"₹{bn_price:,.2f}", f"{bn_change:+.2f}%")
+        else:
+            cols[1].metric("BANK NIFTY", "Loading...")
+    except:
+        cols[1].metric("BANK NIFTY", "Loading...")
+    
+    cols[2].metric("Market Status", "LIVE" if market_open() else "CLOSED")
+    cols[3].metric("Market Regime", "🟢 TRENDING")
+    cols[4].metric("Peak Hours", f"{'🟢 YES' if is_peak_market_hours() else '🔴 NO'}")
+    cols[5].metric("Auto Trades", f"{trader.auto_trades_count}/{MAX_AUTO_TRADES}")
+    cols[6].metric("Available Cash", f"₹{trader.cash:,.0f}")
+    
+    # Market Mood Gauges
+    st.subheader("📊 Market Mood Gauges")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    try:
+        nifty_data = yf.download("^NSEI", period="1d", interval="5m", auto_adjust=False)
+        if not nifty_data.empty:
+            nifty_current = float(nifty_data["Close"].iloc[-1])
+            nifty_prev = float(nifty_data["Close"].iloc[-2])
+            nifty_change = ((nifty_current - nifty_prev) / nifty_prev) * 100
+            nifty_sentiment = 50 + (nifty_change * 8)
+            nifty_sentiment = max(0, min(100, round(nifty_sentiment)))
+        else:
+            nifty_current = 22000
+            nifty_change = 0.15
+            nifty_sentiment = 65
+    except:
+        nifty_current = 22000
+        nifty_change = 0.15
+        nifty_sentiment = 65
+    
+    try:
+        banknifty_data = yf.download("^NSEBANK", period="1d", interval="5m", auto_adjust=False)
+        if not banknifty_data.empty:
+            banknifty_current = float(banknifty_data["Close"].iloc[-1])
+            banknifty_prev = float(banknifty_data["Close"].iloc[-2])
+            banknifty_change = ((banknifty_current - banknifty_prev) / banknifty_prev) * 100
+            banknifty_sentiment = 50 + (banknifty_change * 8)
+            banknifty_sentiment = max(0, min(100, round(banknifty_sentiment)))
+        else:
+            banknifty_current = 48000
+            banknifty_change = 0.25
+            banknifty_sentiment = 70
+    except:
+        banknifty_current = 48000
+        banknifty_change = 0.25
+        banknifty_sentiment = 70
+    
+    with col1:
+        st.markdown(create_circular_market_mood_gauge("NIFTY 50", nifty_current, nifty_change, nifty_sentiment), unsafe_allow_html=True)
+    with col2:
+        st.markdown(create_circular_market_mood_gauge("BANK NIFTY", banknifty_current, banknifty_change, banknifty_sentiment), unsafe_allow_html=True)
+    with col3:
+        market_status = "LIVE" if market_open() else "CLOSED"
+        status_sentiment = 80 if market_open() else 20
+        st.markdown(create_circular_market_mood_gauge("MARKET", 0, 0, status_sentiment).replace("₹0", market_status).replace("0.00%", ""), unsafe_allow_html=True)
+    with col4:
+        peak_hours_status = "PEAK" if is_peak_market_hours() else "OFF-PEAK"
+        peak_sentiment = 80 if is_peak_market_hours() else 30
+        st.markdown(create_circular_market_mood_gauge("PEAK HOURS", 0, 0, peak_sentiment).replace("₹0", "9:30AM-2:30PM").replace("0.00%", peak_hours_status), unsafe_allow_html=True)
+    
+    # Refresh controls
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        st.markdown(f"<div style='text-align: left; color: #6b7280; font-size: 14px;'>Refresh Count: <span class='refresh-counter'>{st.session_state.refresh_count}</span></div>", unsafe_allow_html=True)
+    with col2:
+        if st.button("🔄 Manual Refresh", key="manual_refresh_main_btn"):
+            st.rerun()
+    with col3:
+        if st.button("📊 Update Prices", key="update_prices_main_btn"):
+            st.rerun()
+    
+    # Main Tabs - INCLUDING KITE CHARTS AND ALGO TRADING
     tabs = st.tabs(["📈 Dashboard", "🚦 Signals", "💰 Paper Trading", "📋 Trade History", 
-                   "📉 RSI Scanner", "🎯 High Accuracy"])
+                   "📉 RSI Scanner", "🎯 High Accuracy", "📊 Kite Charts", "🤖 Algo Trading"])
     
     # Tab 1: Dashboard
     with tabs[0]:
@@ -1463,11 +2150,19 @@ def main():
                 st.success("High accuracy scan completed!")
                 st.info("High accuracy signal generation logic would be implemented here")
     
+    # Tab 7: Kite Charts - NEW TAB
+    with tabs[6]:
+        create_kite_live_charts(kite_manager)
+    
+    # Tab 8: Algo Trading - NEW TAB
+    with tabs[7]:
+        create_algo_trading_tab(algo_engine)
+    
     # Footer
     st.markdown("---")
     st.markdown(f"""
     <div style="text-align: center; color: #6b7280; font-size: 12px;">
-        <strong>Rantv Terminal Pro</strong> | Enhanced Intraday Trading Platform | © 2024 | 
+        <strong>Rantv Terminal Pro</strong> | Complete Trading Suite with Algo Engine & Live Charts | © 2024 | 
         Refresh: {st.session_state.refresh_count} | {now_indian().strftime("%H:%M:%S")}
     </div>
     """, unsafe_allow_html=True)
