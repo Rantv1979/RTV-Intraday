@@ -13,6 +13,23 @@ from enum import Enum
 import logging
 import json
 import pytz
+# ====== Optional PDF reporting (ReportLab) ======
+HAVE_REPORTLAB = True
+try:
+    from reportlab.platypus import (
+        SimpleDocTemplate as _pt_SimpleDocTemplate,
+        Paragraph as _pt_Paragraph,
+        Table as _pt_Table,
+    )
+    from reportlab.lib.styles import getSampleStyleSheet as _pt_getSampleStyleSheet
+    from reportlab.lib.pagesizes import A4 as _pt_A4
+except Exception:
+    HAVE_REPORTLAB = False
+    import logging as _rl_logging
+    _rl_logging.warning(
+        "ReportLab not available; PDF reports disabled. "
+        "Install with: pip install reportlab"
+    )
 
 logger = logging.getLogger(__name__)
 
