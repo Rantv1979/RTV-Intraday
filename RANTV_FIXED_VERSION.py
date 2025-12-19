@@ -13,7 +13,152 @@ from enum import Enum
 import logging
 import json
 import pytz
+import os
+import time
+import threading
+import subprocess
+import sys
+import webbrowser
+import logging
+import json
+import pytz
+import traceback
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Callable
+from enum import Enum
 
+import streamlit as st
+import plotly.graph_objects as go
+import pandas as pd
+from kiteconnect import KiteConnect
+
+# --- STYLING & THEME ---
+def apply_custom_theme():
+    st.markdown("""
+        <style>
+        /* Light Green Background for the main app */
+        .stApp {
+            background-color: #e8f5e9;
+        }
+        /* Sidebar Styling */
+        [data-testid="stSidebar"] {
+            background-color: #c8e6c9;
+            border-right: 1px solid #a5d6a7;
+        }
+        /* Dashboard Card Styling */
+        .metric-card {
+            background-color: white;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            border-left: 5px solid #4caf50;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+# --- BROWSER LOGIN HELPER ---
+def open_kite_login(url):
+    """Force opens the login URL in the system browser"""
+    try:
+        # Try standard webbrowser first
+        webbrowser.open(url, new=2)
+    except Exception:
+        # Fallback to subprocess for Windows/Mac/Linux
+        if sys.platform == 'win32':
+            os.startfile(url)
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', url])
+        else:
+            try:
+                subprocess.Popen(['xdg-open', url])
+            except:
+                st.error("Could not automatically open browser. Please copy the URL below.")
+
+# --- APP CONFIGURATION ---
+st.set_page_config(page_title="Rantv Terminal Pro", layout="wide")
+apply_custom_theme()
+
+# Initialize session state
+if 'kite' not in st.session_state: st.session_state.kite = None
+if 'authenticated' not in st.session_state: st.session_state.authenticated = False
+
+# --- SIDEBAR: AUTHENTICATION ---
+with st.sidebar:
+    st.title("🔐 Kite Connect")
+    api_key = st.text_input("API Key", type="password", value=os.environ.get("KITE_API_KEY", ""))
+    api_secret = st.text_input("API Secret", type="password", value=os.environ.get("KITE_API_SECRET", ""))
+    
+    if st.button("🚀 Launch Kite Login", type="primary"):
+        if api_key and api_secret:
+            kite = KiteConnect(api_key=api_key)
+            login_url = kite.login_url()
+            st.session_state.api_key = api_key
+            st.session_state.api_secret = api_secret
+            
+            open_kite_login(login_url)
+            st.success("Redirecting to Kite login...")
+            st.code(login_url)
+        else:
+            st.error("Missing API Credentials")
+
+    st.divider()
+    request_token = st.text_input("Paste Request Token here")
+    if st.button("Complete Authentication"):
+        try:
+            kite = KiteConnect(api_key=st.session_state.api_key)
+            data = kite.generate_session(request_token, api_secret=st.session_state.api_secret)
+            st.session_state.kite = kite
+            st.session_state.kite.set_access_token(data['access_token'])
+            st.session_state.authenticated = True
+            st.success(f"Connected: {data.get('user_id')}")
+            st.balloons()
+        except Exception as e:
+            st.error(f"Auth Error: {e}")
+
+# --- MAIN DASHBOARD ---
+st.title("📈 Rantv Intraday Terminal Pro")
+
+if not st.session_state.authenticated:
+    st.info("👋 Welcome! Please authenticate via the sidebar to access live trading and charts.")
+    # Placeholder layout
+    col1, col2 = st.columns(2)
+    with col1: st.image("https://via.placeholder.com/600x400.png?text=Connect+Kite+to+View+Charts", use_container_width=True)
+else:
+    tabs = st.tabs(["📊 Live Market", "🤖 Algo Control", "📋 Portfolio"])
+    
+    with tabs[0]:
+        st.subheader("Live Market Insights")
+        # Example dynamic chart implementation
+        symbol = st.selectbox("Select Ticker", ["NSE:RELIANCE", "NSE:TCS", "NSE:NIFTY 50"])
+        if st.button("Fetch Live Data"):
+            try:
+                ltp = st.session_state.kite.ltp([symbol])
+                price = ltp[symbol]['last_price']
+                st.metric(symbol, f"₹{price}")
+            except Exception as e:
+                st.error(f"Error fetching: {e}")
+
+    with tabs[1]:
+        st.subheader("Automated Strategy Engine")
+        st.write("Engine Status: **ACTIVE**" if st.session_state.authenticated else "Engine Status: **WAITING**")
+        # Integration point for AlgoEngine class logic
+        
+    with tabs[2]:
+        st.subheader("Current Holdings & PnL")
+        # Fetching positions
+        try:
+            positions = st.session_state.kite.positions()
+            if positions['net']:
+                st.write(pd.DataFrame(positions['net']))
+            else:
+                st.write("No open positions found.")
+        except:
+            st.info("Connect to Kite to view positions.")
+
+# --- FOOTER ---
+st.markdown("---")
+st.caption("Rantv Terminal Pro | Risk Managed Automated Trading | © 2024")
 import streamlit as st
 import webbrowser
 from kiteconnect import KiteConnect
