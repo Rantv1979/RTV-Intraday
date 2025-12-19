@@ -15,14 +15,14 @@ import json
 import pytz
 
 from kiteconnect import KiteConnect
-import os
 
-# Initialize with your API key
-kite = KiteConnect(api_key="your_api_key")
+api_key = "your_api_key_here"
+kite = KiteConnect(api_key=api_key)
 
 # Generate login URL
 login_url = kite.login_url()
 print(f"Login URL: {login_url}")
+
 # Use the URL to login and get request_token
 logger = logging.getLogger(__name__)
 
