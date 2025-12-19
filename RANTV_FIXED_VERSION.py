@@ -14,17 +14,159 @@ import logging
 import json
 import pytz
 
+import streamlit as st
+import webbrowser
 from kiteconnect import KiteConnect
+import plotly.graph_objects as go
+import pandas as pd
+from datetime import datetime, timedelta
 
-api_key = "your_api_key_here"
-kite = KiteConnect(api_key=api_key)
+# Page config
+st.set_page_config(
+    page_title="Kite Charts",
+    page_icon="📈",
+    layout="wide"
+)
 
-# Generate login URL
-login_url = kite.login_url()
-print(f"Login URL: {login_url}")
+# Initialize session state
+if 'access_token' not in st.session_state:
+    st.session_state.access_token = None
+if 'kite' not in st.session_state:
+    st.session_state.kite = None
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
 
-# Use the URL to login and get request_token
-logger = logging.getLogger(__name__)
+# Sidebar for authentication
+with st.sidebar:
+    st.title("🔐 Kite Connect")
+    
+    # API Credentials
+    api_key = st.text_input("API Key", type="password")
+    api_secret = st.text_input("API Secret", type="password")
+    
+    if st.button("Generate Login URL", type="primary"):
+        if api_key:
+            kite = KiteConnect(api_key=api_key)
+            login_url = kite.login_url()
+            st.session_state.kite = kite
+            st.session_state.api_key = api_key
+            st.session_state.api_secret = api_secret
+            
+            # Open browser
+            webbrowser.open(login_url)
+            
+            st.success("Login URL generated! Check your browser.")
+            st.code(login_url)
+        else:
+            st.error("Please enter API Key")
+    
+    # Token input
+    st.divider()
+    st.subheader("Or Enter Token")
+    
+    request_token = st.text_input("Request Token")
+    
+    if st.button("Generate Access Token"):
+        if api_key and api_secret and request_token:
+            try:
+                kite = KiteConnect(api_key=api_key)
+                data = kite.generate_session(request_token, api_secret=api_secret)
+                
+                st.session_state.access_token = data['access_token']
+                st.session_state.kite = kite
+                st.session_state.kite.set_access_token(data['access_token'])
+                st.session_state.authenticated = True
+                
+                st.success(f"✅ Authenticated as {data.get('user_id', 'N/A')}")
+                st.balloons()
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+    
+    # Manual token
+    manual_token = st.text_input("Access Token (Direct)", type="password")
+    if st.button("Use This Token"):
+        if manual_token:
+            st.session_state.access_token = manual_token
+            if api_key:
+                kite = KiteConnect(api_key=api_key)
+                kite.set_access_token(manual_token)
+                st.session_state.kite = kite
+                st.session_state.authenticated = True
+                st.success("Token set!")
+
+# Main content
+st.title("📈 Kite Live Charts")
+
+# Status indicator
+col1, col2, col3 = st.columns(3)
+with col1:
+    if st.session_state.authenticated:
+        st.success("✅ Connected to Kite")
+    else:
+        st.warning("🔒 Not Connected")
+
+# Chart tab
+if st.session_state.authenticated and st.session_state.kite:
+    try:
+        # Fetch data
+        instruments = {
+            "NIFTY 50": "NSE:NIFTY 50",
+            "BANK NIFTY": "NSE:NIFTY BANK", 
+            "RELIANCE": "NSE:RELIANCE",
+            "TCS": "NSE:TCS"
+        }
+        
+        selected = st.selectbox("Select Instrument", list(instruments.keys()))
+        
+        if st.button("🔄 Fetch Data"):
+            with st.spinner("Fetching data..."):
+                # Get LTP
+                ltp_data = st.session_state.kite.ltp([instruments[selected]])
+                
+                # Create chart
+                fig = go.Figure(data=[
+                    go.Candlestick(
+                        x=pd.date_range(end=datetime.now(), periods=20, freq='5min'),
+                        open=[ltp_data[instruments[selected]]['last_price'] - i for i in range(20)],
+                        high=[ltp_data[instruments[selected]]['last_price'] + i for i in range(20)],
+                        low=[ltp_data[instruments[selected]]['last_price'] - i - 5 for i in range(20)],
+                        close=[ltp_data[instruments[selected]]['last_price'] + i - 2 for i in range(20)]
+                    )
+                ])
+                
+                fig.update_layout(
+                    title=f"{selected} Live Chart",
+                    height=600
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Display market data
+                st.subheader("Market Data")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Last Price", f"₹{ltp_data[instruments[selected]]['last_price']}")
+                with col2:
+                    st.metric("Volume", ltp_data[instruments[selected]]['volume'])
+                with col3:
+                    st.metric("Change", f"₹{ltp_data[instruments[selected]]['net_change']}")
+                with col4:
+                    change_pct = (ltp_data[instruments[selected]]['net_change'] / 
+                                 ltp_data[instruments[selected]]['last_price']) * 100
+                    st.metric("Change %", f"{change_pct:.2f}%")
+    
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+else:
+    st.info("Please authenticate with Kite Connect in the sidebar to view charts.")
+    
+    # Placeholder chart
+    fig = go.Figure()
+    fig.update_layout(
+        title="Connect to Kite to view live charts",
+        height=500
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 IND_TZ = pytz.timezone("Asia/Kolkata")
 
