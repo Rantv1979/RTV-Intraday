@@ -29,7 +29,21 @@ from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 import warnings
 import re
+import random
+from scipy import stats
+import talib  # Add this import
 
+# Add after the imports section
+try:
+    import talib
+    TALIB_AVAILABLE = True
+except ImportError:
+    if install_package("TA-Lib"):
+        import talib
+        TALIB_AVAILABLE = True
+    else:
+        TALIB_AVAILABLE = False
+        st.warning("TA-Lib not available. Using custom indicators.")
 # Auto-install missing dependencies
 def install_package(package_name):
     try:
@@ -1292,6 +1306,902 @@ class MultiStrategyIntradayTrader:
             except Exception:
                 continue
         return out
+
+# ===================== SIGNAL GENERATOR CLASS =====================
+class SignalGenerator:
+    """Generate trading signals for algo paper trading"""
+    
+    def __init__(self, data_manager):
+        self.data_manager = data_manager
+        self.signals_generated = 0
+        self.last_scan_time = None
+        self.signal_cache = {}
+        
+    def calculate_signal_quality(self, signals):
+        """Calculate overall quality score for signals"""
+        if not signals:
+            return 0.0
+        
+        avg_confidence = sum(s.get('confidence', 0) for s in signals) / len(signals)
+        avg_score = sum(s.get('score', 0) for s in signals) / len(signals)
+        
+        # Multiplier based on market conditions
+        market_multiplier = 1.0
+        if is_peak_market_hours():
+            market_multiplier = 1.2
+        if not market_open():
+            market_multiplier = 0.5
+        
+        return min(100.0, (avg_confidence * 10 + avg_score * 10) * market_multiplier)
+    
+    def generate_multi_strategy_signal(self, symbol, data):
+        """Generate signal using multiple strategy confluence"""
+        if data is None or len(data) < 50:
+            return None
+        
+        try:
+            signals = []
+            current_price = float(data['Close'].iloc[-1])
+            
+            # 1. EMA Strategy
+            ema_signal = self._check_ema_strategy(data)
+            if ema_signal:
+                signals.append(ema_signal)
+            
+            # 2. RSI Strategy
+            rsi_signal = self._check_rsi_strategy(data)
+            if rsi_signal:
+                signals.append(rsi_signal)
+            
+            # 3. MACD Strategy
+            macd_signal = self._check_macd_strategy(data)
+            if macd_signal:
+                signals.append(macd_signal)
+            
+            # 4. Bollinger Bands Strategy
+            bb_signal = self._check_bollinger_strategy(data)
+            if bb_signal:
+                signals.append(bb_signal)
+            
+            # 5. Volume Strategy
+            volume_signal = self._check_volume_strategy(data)
+            if volume_signal:
+                signals.append(volume_signal)
+            
+            # 6. Support/Resistance Strategy
+            sr_signal = self._check_support_resistance_strategy(data, current_price)
+            if sr_signal:
+                signals.append(sr_signal)
+            
+            if not signals:
+                return None
+            
+            # Combine signals
+            buy_signals = [s for s in signals if s['action'] == 'BUY']
+            sell_signals = [s for s in signals if s['action'] == 'SELL']
+            
+            # Calculate weighted score
+            buy_score = sum(s['weight'] * s['confidence'] for s in buy_signals)
+            sell_score = sum(s['weight'] * s['confidence'] for s in sell_signals)
+            
+            # Determine final action
+            if len(buy_signals) > len(sell_signals) and buy_score > sell_score:
+                action = 'BUY'
+                confidence = buy_score / max(1, len(buy_signals))
+                score = len(buy_signals)
+                strategy = "Multi-Strategy Confluence"
+            elif len(sell_signals) > len(buy_signals) and sell_score > buy_score:
+                action = 'SELL'
+                confidence = sell_score / max(1, len(sell_signals))
+                score = len(sell_signals)
+                strategy = "Multi-Strategy Confluence"
+            else:
+                # Neutral or conflicting signals
+                return None
+            
+            # Calculate stop loss and target
+            atr = float(data['ATR'].iloc[-1]) if 'ATR' in data.columns else current_price * 0.02
+            
+            if action == 'BUY':
+                stop_loss = current_price - (atr * 1.5)
+                target = current_price + (atr * 3.0)
+            else:
+                stop_loss = current_price + (atr * 1.5)
+                target = current_price - (atr * 3.0)
+            
+            # Calculate win probability based on confidence and market conditions
+            base_prob = min(0.95, confidence * 0.8)
+            if is_peak_market_hours():
+                base_prob = min(0.97, base_prob * 1.1)
+            
+            return {
+                'symbol': symbol,
+                'action': action,
+                'price': current_price,
+                'stop_loss': round(stop_loss, 2),
+                'target': round(target, 2),
+                'confidence': round(confidence, 3),
+                'score': score,
+                'strategy': strategy,
+                'win_probability': round(base_prob, 3),
+                'timestamp': now_indian(),
+                'atr': round(atr, 2),
+                'signal_count': len(signals),
+                'rsi': float(data['RSI14'].iloc[-1]) if 'RSI14' in data.columns else 50
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating signal for {symbol}: {e}")
+            return None
+    
+    def _check_ema_strategy(self, data):
+        """Check EMA crossover strategy"""
+        try:
+            if len(data) < 50:
+                return None
+            
+            ema8 = data['EMA8'].iloc[-1]
+            ema21 = data['EMA21'].iloc[-1]
+            ema50 = data['EMA50'].iloc[-1]
+            price = data['Close'].iloc[-1]
+            
+            # Bullish: Price above all EMAs and EMA8 > EMA21 > EMA50
+            if price > ema8 > ema21 > ema50:
+                return {
+                    'action': 'BUY',
+                    'confidence': 0.85,
+                    'weight': 2,
+                    'strategy': 'EMA Golden Cross'
+                }
+            
+            # Bearish: Price below all EMAs and EMA8 < EMA21 < EMA50
+            elif price < ema8 < ema21 < ema50:
+                return {
+                    'action': 'SELL',
+                    'confidence': 0.85,
+                    'weight': 2,
+                    'strategy': 'EMA Death Cross'
+                }
+            
+            # EMA8 crossover EMA21
+            ema8_prev = data['EMA8'].iloc[-2]
+            ema21_prev = data['EMA21'].iloc[-2]
+            
+            if ema8 > ema21 and ema8_prev <= ema21_prev:
+                return {
+                    'action': 'BUY',
+                    'confidence': 0.75,
+                    'weight': 1,
+                    'strategy': 'EMA8/21 Crossover'
+                }
+            elif ema8 < ema21 and ema8_prev >= ema21_prev:
+                return {
+                    'action': 'SELL',
+                    'confidence': 0.75,
+                    'weight': 1,
+                    'strategy': 'EMA8/21 Crossover'
+                }
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def _check_rsi_strategy(self, data):
+        """Check RSI strategy"""
+        try:
+            if 'RSI14' not in data.columns:
+                return None
+            
+            rsi = data['RSI14'].iloc[-1]
+            rsi_prev = data['RSI14'].iloc[-2] if len(data) > 1 else rsi
+            
+            # Oversold bounce
+            if rsi < 30 and rsi > rsi_prev:
+                return {
+                    'action': 'BUY',
+                    'confidence': 0.80,
+                    'weight': 1.5,
+                    'strategy': 'RSI Oversold Bounce'
+                }
+            
+            # Overbought reversal
+            elif rsi > 70 and rsi < rsi_prev:
+                return {
+                    'action': 'SELL',
+                    'confidence': 0.80,
+                    'weight': 1.5,
+                    'strategy': 'RSI Overbought Reversal'
+                }
+            
+            # RSI divergence (simplified)
+            if len(data) > 20:
+                prices = data['Close'].iloc[-20:]
+                rsis = data['RSI14'].iloc[-20:]
+                
+                # Bullish divergence: Lower lows in price, higher lows in RSI
+                if (prices.iloc[-1] < prices.iloc[-5] and 
+                    rsis.iloc[-1] > rsis.iloc[-5] and 
+                    rsi < 45):
+                    return {
+                        'action': 'BUY',
+                        'confidence': 0.85,
+                        'weight': 2,
+                        'strategy': 'RSI Bullish Divergence'
+                    }
+                
+                # Bearish divergence: Higher highs in price, lower highs in RSI
+                elif (prices.iloc[-1] > prices.iloc[-5] and 
+                      rsis.iloc[-1] < rsis.iloc[-5] and 
+                      rsi > 55):
+                    return {
+                        'action': 'SELL',
+                        'confidence': 0.85,
+                        'weight': 2,
+                        'strategy': 'RSI Bearish Divergence'
+                    }
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def _check_macd_strategy(self, data):
+        """Check MACD strategy"""
+        try:
+            if 'MACD' not in data.columns or 'MACD_Signal' not in data.columns:
+                return None
+            
+            macd = data['MACD'].iloc[-1]
+            signal = data['MACD_Signal'].iloc[-1]
+            hist = data['MACD_Hist'].iloc[-1]
+            
+            macd_prev = data['MACD'].iloc[-2] if len(data) > 1 else macd
+            signal_prev = data['MACD_Signal'].iloc[-2] if len(data) > 1 else signal
+            hist_prev = data['MACD_Hist'].iloc[-2] if len(data) > 1 else hist
+            
+            # MACD crossover signal line
+            if macd > signal and macd_prev <= signal_prev:
+                return {
+                    'action': 'BUY',
+                    'confidence': 0.75,
+                    'weight': 1,
+                    'strategy': 'MACD Bullish Crossover'
+                }
+            elif macd < signal and macd_prev >= signal_prev:
+                return {
+                    'action': 'SELL',
+                    'confidence': 0.75,
+                    'weight': 1,
+                    'strategy': 'MACD Bearish Crossover'
+                }
+            
+            # MACD histogram turning positive/negative
+            if hist > 0 and hist_prev <= 0:
+                return {
+                    'action': 'BUY',
+                    'confidence': 0.70,
+                    'weight': 0.8,
+                    'strategy': 'MACD Histogram Turn'
+                }
+            elif hist < 0 and hist_prev >= 0:
+                return {
+                    'action': 'SELL',
+                    'confidence': 0.70,
+                    'weight': 0.8,
+                    'strategy': 'MACD Histogram Turn'
+                }
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def _check_bollinger_strategy(self, data):
+        """Check Bollinger Bands strategy"""
+        try:
+            if 'BB_Upper' not in data.columns or 'BB_Lower' not in data.columns:
+                return None
+            
+            price = data['Close'].iloc[-1]
+            bb_upper = data['BB_Upper'].iloc[-1]
+            bb_lower = data['BB_Lower'].iloc[-1]
+            bb_middle = data['BB_Middle'].iloc[-1]
+            
+            # Price touches lower band and starts moving up
+            if price <= bb_lower * 1.005 and data['Close'].iloc[-1] > data['Close'].iloc[-2]:
+                return {
+                    'action': 'BUY',
+                    'confidence': 0.80,
+                    'weight': 1.5,
+                    'strategy': 'Bollinger Band Bounce'
+                }
+            
+            # Price touches upper band and starts moving down
+            elif price >= bb_upper * 0.995 and data['Close'].iloc[-1] < data['Close'].iloc[-2]:
+                return {
+                    'action': 'SELL',
+                    'confidence': 0.80,
+                    'weight': 1.5,
+                    'strategy': 'Bollinger Band Rejection'
+                }
+            
+            # Bollinger Band squeeze breakout
+            if len(data) > 20:
+                bb_width = (bb_upper - bb_lower) / bb_middle
+                bb_width_prev = (data['BB_Upper'].iloc[-2] - data['BB_Lower'].iloc[-2]) / data['BB_Middle'].iloc[-2]
+                
+                # Squeeze followed by expansion
+                if bb_width_prev < 0.05 and bb_width > bb_width_prev * 1.2:
+                    if price > bb_middle:
+                        return {
+                            'action': 'BUY',
+                            'confidence': 0.85,
+                            'weight': 2,
+                            'strategy': 'BB Squeeze Breakout Up'
+                        }
+                    else:
+                        return {
+                            'action': 'SELL',
+                            'confidence': 0.85,
+                            'weight': 2,
+                            'strategy': 'BB Squeeze Breakout Down'
+                        }
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def _check_volume_strategy(self, data):
+        """Check volume-based strategies"""
+        try:
+            if len(data) < 10:
+                return None
+            
+            volume = data['Volume'].iloc[-1]
+            avg_volume = data['Volume'].rolling(20).mean().iloc[-1]
+            price_change = ((data['Close'].iloc[-1] - data['Close'].iloc[-2]) / data['Close'].iloc[-2]) * 100
+            
+            # High volume breakout
+            if volume > avg_volume * 1.5 and abs(price_change) > 1:
+                if price_change > 0:
+                    return {
+                        'action': 'BUY',
+                        'confidence': 0.75,
+                        'weight': 1.2,
+                        'strategy': 'Volume Breakout Up'
+                    }
+                else:
+                    return {
+                        'action': 'SELL',
+                        'confidence': 0.75,
+                        'weight': 1.2,
+                        'strategy': 'Volume Breakout Down'
+                    }
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def _check_support_resistance_strategy(self, data, current_price):
+        """Check support/resistance strategy"""
+        try:
+            if 'Support' not in data.columns or 'Resistance' not in data.columns:
+                return None
+            
+            support = data['Support'].iloc[-1]
+            resistance = data['Resistance'].iloc[-1]
+            
+            # Near support with bounce
+            if current_price <= support * 1.01 and current_price > data['Close'].iloc[-2]:
+                return {
+                    'action': 'BUY',
+                    'confidence': 0.80,
+                    'weight': 1.5,
+                    'strategy': 'Support Bounce'
+                }
+            
+            # Near resistance with rejection
+            elif current_price >= resistance * 0.99 and current_price < data['Close'].iloc[-2]:
+                return {
+                    'action': 'SELL',
+                    'confidence': 0.80,
+                    'weight': 1.5,
+                    'strategy': 'Resistance Rejection'
+                }
+            
+            # Breakout above resistance
+            if current_price > resistance and data['Close'].iloc[-2] <= resistance:
+                return {
+                    'action': 'BUY',
+                    'confidence': 0.85,
+                    'weight': 2,
+                    'strategy': 'Resistance Breakout'
+                }
+            
+            # Breakdown below support
+            elif current_price < support and data['Close'].iloc[-2] >= support:
+                return {
+                    'action': 'SELL',
+                    'confidence': 0.85,
+                    'weight': 2,
+                    'strategy': 'Support Breakdown'
+                }
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def scan_stock_universe(self, universe, max_stocks=50, min_confidence=0.70):
+        """Scan stock universe for trading signals"""
+        signals = []
+        cache_key = f"scan_{universe}_{max_stocks}"
+        
+        # Check cache
+        if cache_key in self.signal_cache:
+            cached = self.signal_cache[cache_key]
+            if (time.time() - cached['timestamp']) < 300:  # 5 minute cache
+                return cached['signals']
+        
+        # Determine which stocks to scan
+        if universe == "Nifty 50":
+            stocks = NIFTY_50[:min(max_stocks, len(NIFTY_50))]
+        elif universe == "Nifty 100":
+            stocks = NIFTY_100[:min(max_stocks, len(NIFTY_100))]
+        elif universe == "Midcap 150":
+            stocks = NIFTY_MIDCAP_150[:min(max_stocks, len(NIFTY_MIDCAP_150))]
+        else:
+            stocks = ALL_STOCKS[:min(max_stocks, len(ALL_STOCKS))]
+        
+        # Progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, symbol in enumerate(stocks):
+            status_text.text(f"Scanning {symbol.replace('.NS', '')}... ({i+1}/{len(stocks)})")
+            
+            try:
+                # Get stock data
+                data = self.data_manager.get_stock_data(symbol, "15m")
+                
+                if data is not None and len(data) > 50:
+                    # Generate signal
+                    signal = self.generate_multi_strategy_signal(symbol, data)
+                    
+                    if signal and signal['confidence'] >= min_confidence:
+                        signals.append(signal)
+                
+            except Exception as e:
+                logger.error(f"Error scanning {symbol}: {e}")
+                continue
+            
+            # Update progress
+            progress_bar.progress((i + 1) / len(stocks))
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Sort signals by confidence score
+        signals.sort(key=lambda x: x['confidence'] * x['score'], reverse=True)
+        
+        # Cache results
+        self.signal_cache[cache_key] = {
+            'signals': signals,
+            'timestamp': time.time(),
+            'count': len(signals)
+        }
+        
+        self.signals_generated += len(signals)
+        self.last_scan_time = now_indian()
+        
+        return signals
+
+# ===================== UPDATE MULTISTRATEGYINTRADAYTRADER =====================
+# Add this method to the MultiStrategyIntradayTrader class:
+
+def execute_auto_trade_from_signal(self, signal, max_quantity=50):
+    """Execute auto trade based on generated signal"""
+    if not self.can_auto_trade():
+        return False, "Auto trading limits reached"
+    
+    symbol = signal['symbol']
+    action = signal['action']
+    price = signal['price']
+    stop_loss = signal['stop_loss']
+    target = signal['target']
+    strategy = signal['strategy']
+    confidence = signal['confidence']
+    
+    # Calculate position size based on confidence and risk
+    position_size_pct = min(0.2, confidence * 0.25)  # Max 20% per trade
+    max_trade_value = self.cash * position_size_pct
+    quantity = int(max_trade_value / price)
+    
+    # Apply limits
+    quantity = min(quantity, max_quantity)
+    
+    if quantity < 1:
+        return False, "Position size too small"
+    
+    # Execute trade
+    success, msg = self.execute_trade(
+        symbol=symbol,
+        action=action,
+        quantity=quantity,
+        price=price,
+        stop_loss=stop_loss,
+        target=target,
+        win_probability=signal['win_probability'],
+        auto_trade=True,
+        strategy=strategy
+    )
+    
+    if success:
+        logger.info(f"Auto trade executed: {msg}")
+    
+    return success, msg
+
+# Add this to the MultiStrategyIntradayTrader __init__ method:
+self.signal_generator = SignalGenerator(self.data_manager)
+
+# ===================== UPDATE SIGNALS TAB =====================
+# Replace the Signals tab content with:
+
+with tabs[1]:
+    st.subheader("📊 Multi-Strategy Signal Scanner")
+    
+    # Signal generator controls
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        scan_mode = st.radio(
+            "Scan Mode",
+            ["Quick Scan (Top 30)", "Full Universe Scan"],
+            horizontal=True,
+            key="scan_mode"
+        )
+    
+    with col2:
+        min_confidence = st.slider(
+            "Min Confidence",
+            min_value=0.60,
+            max_value=0.95,
+            value=0.70,
+            step=0.05,
+            key="min_conf_signal"
+        )
+    
+    with col3:
+        max_signals = st.number_input(
+            "Max Signals",
+            min_value=1,
+            max_value=20,
+            value=10,
+            key="max_signals_input"
+        )
+    
+    # Generate signals button
+    if st.button("🚀 Generate Trading Signals", type="primary", key="generate_signals_btn"):
+        st.session_state.last_signal_generation = time.time()
+        
+        with st.spinner(f"Scanning {universe} for trading signals..."):
+            # Determine scan size
+            scan_size = 30 if scan_mode == "Quick Scan (Top 30)" else 100
+            
+            # Generate signals
+            signals = trader.signal_generator.scan_stock_universe(
+                universe=universe,
+                max_stocks=scan_size,
+                min_confidence=min_confidence
+            )
+            
+            # Store in session state
+            st.session_state.generated_signals = signals[:max_signals]
+            st.session_state.signal_quality = trader.signal_generator.calculate_signal_quality(signals)
+            
+            st.success(f"✅ Generated {len(signals)} signals (showing top {min(max_signals, len(signals))})")
+    
+    # Display signals if available
+    if 'generated_signals' in st.session_state and st.session_state.generated_signals:
+        signals = st.session_state.generated_signals
+        
+        # Signal quality indicator
+        quality = st.session_state.get('signal_quality', 0)
+        
+        if quality >= 70:
+            quality_class = "high-quality-signal"
+            quality_text = "HIGH QUALITY"
+        elif quality >= 50:
+            quality_class = "medium-quality-signal"
+            quality_text = "MEDIUM QUALITY"
+        else:
+            quality_class = "alert-warning"
+            quality_text = "LOW QUALITY"
+        
+        st.markdown(f"""
+        <div class="{quality_class}">
+            <strong>📊 Signal Quality: {quality_text}</strong> | 
+            Score: {quality:.1f}/100 | 
+            Generated: {trader.signal_generator.last_scan_time.strftime('%H:%M:%S') if trader.signal_generator.last_scan_time else 'N/A'}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Display signals in a table
+        signal_data = []
+        for i, signal in enumerate(signals):
+            signal_data.append({
+                "#": i+1,
+                "Symbol": signal['symbol'].replace('.NS', ''),
+                "Action": f"{'🟢 BUY' if signal['action'] == 'BUY' else '🔴 SELL'}",
+                "Price": f"₹{signal['price']:.2f}",
+                "Stop Loss": f"₹{signal['stop_loss']:.2f}",
+                "Target": f"₹{signal['target']:.2f}",
+                "Confidence": f"{signal['confidence']:.1%}",
+                "Score": signal['score'],
+                "Win Prob": f"{signal['win_probability']:.1%}",
+                "Strategy": signal['strategy'],
+                "RSI": f"{signal.get('rsi', 0):.1f}"
+            })
+        
+        # Create dataframe
+        df_signals = pd.DataFrame(signal_data)
+        
+        # Display with formatting
+        st.dataframe(
+            df_signals,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Action": st.column_config.TextColumn(width="small"),
+                "Confidence": st.column_config.ProgressColumn(
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=1.0
+                ),
+                "Win Prob": st.column_config.ProgressColumn(
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=1.0
+                )
+            }
+        )
+        
+        # Auto-trade controls
+        st.subheader("🤖 Auto-Trade Execution")
+        
+        if not trader.auto_execution:
+            st.warning("Auto execution is disabled. Enable in sidebar to auto-trade.")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("📈 Execute All BUY Signals", type="secondary", 
+                        disabled=not trader.auto_execution or not market_open()):
+                executed = 0
+                for signal in [s for s in signals if s['action'] == 'BUY']:
+                    success, msg = trader.execute_auto_trade_from_signal(signal)
+                    if success:
+                        executed += 1
+                        st.success(f"Executed: {signal['symbol']}")
+                    else:
+                        st.warning(f"Failed: {signal['symbol']} - {msg}")
+                
+                if executed > 0:
+                    st.balloons()
+                    st.success(f"Executed {executed} BUY signals!")
+                    st.rerun()
+        
+        with col2:
+            if st.button("📉 Execute All SELL Signals", type="secondary",
+                        disabled=not trader.auto_execution or not market_open()):
+                executed = 0
+                for signal in [s for s in signals if s['action'] == 'SELL']:
+                    success, msg = trader.execute_auto_trade_from_signal(signal)
+                    if success:
+                        executed += 1
+                        st.success(f"Executed: {signal['symbol']}")
+                    else:
+                        st.warning(f"Failed: {signal['symbol']} - {msg}")
+                
+                if executed > 0:
+                    st.balloons()
+                    st.success(f"Executed {executed} SELL signals!")
+                    st.rerun()
+        
+        with col3:
+            if st.button("🎯 Execute Top 3 Signals", type="primary",
+                        disabled=not trader.auto_execution or not market_open()):
+                executed = 0
+                for signal in signals[:3]:
+                    success, msg = trader.execute_auto_trade_from_signal(signal)
+                    if success:
+                        executed += 1
+                        st.success(f"Executed: {signal['symbol']}")
+                    else:
+                        st.warning(f"Failed: {signal['symbol']} - {msg}")
+                
+                if executed > 0:
+                    st.balloons()
+                    st.success(f"Executed {executed} signals!")
+                    st.rerun()
+        
+        # Manual trade execution for individual signals
+        st.subheader("🎯 Manual Signal Execution")
+        
+        selected_signal_idx = st.selectbox(
+            "Select Signal to Trade",
+            range(len(signals)),
+            format_func=lambda x: f"{signals[x]['symbol'].replace('.NS', '')} - {signals[x]['action']} @ ₹{signals[x]['price']:.2f} ({signals[x]['confidence']:.1%})",
+            key="signal_select"
+        )
+        
+        if selected_signal_idx is not None:
+            selected_signal = signals[selected_signal_idx]
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Action", selected_signal['action'])
+            with col2:
+                st.metric("Price", f"₹{selected_signal['price']:.2f}")
+            with col3:
+                st.metric("Confidence", f"{selected_signal['confidence']:.1%}")
+            with col4:
+                st.metric("Win Probability", f"{selected_signal['win_probability']:.1%}")
+            
+            st.markdown(f"""
+            **Strategy:** {selected_signal['strategy']}  
+            **Stop Loss:** ₹{selected_signal['stop_loss']:.2f} ({abs(selected_signal['price'] - selected_signal['stop_loss']):.2f} points)  
+            **Target:** ₹{selected_signal['target']:.2f} ({abs(selected_signal['target'] - selected_signal['price']):.2f} points)  
+            **Risk/Reward:** 1:{abs((selected_signal['target'] - selected_signal['price']) / (selected_signal['price'] - selected_signal['stop_loss'])):.2f}
+            """)
+            
+            # Manual execution controls
+            exec_col1, exec_col2 = st.columns([1, 2])
+            
+            with exec_col1:
+                quantity = st.number_input(
+                    "Quantity",
+                    min_value=1,
+                    max_value=100,
+                    value=min(10, int(trader.cash * 0.1 / selected_signal['price'])),
+                    key="signal_quantity"
+                )
+            
+            with exec_col2:
+                exec_col2a, exec_col2b = st.columns(2)
+                with exec_col2a:
+                    if st.button("📈 Execute Trade", type="primary", key="execute_signal_trade"):
+                        success, msg = trader.execute_trade(
+                            symbol=selected_signal['symbol'],
+                            action=selected_signal['action'],
+                            quantity=quantity,
+                            price=selected_signal['price'],
+                            stop_loss=selected_signal['stop_loss'],
+                            target=selected_signal['target'],
+                            win_probability=selected_signal['win_probability'],
+                            auto_trade=False,
+                            strategy=selected_signal['strategy']
+                        )
+                        
+                        if success:
+                            st.success(f"✅ {msg}")
+                            st.balloons()
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {msg}")
+                
+                with exec_col2b:
+                    if st.button("🤖 Auto-Trade This", type="secondary", key="auto_trade_signal",
+                                disabled=not trader.auto_execution):
+                        success, msg = trader.execute_auto_trade_from_signal(selected_signal)
+                        
+                        if success:
+                            st.success(f"✅ Auto-trade executed: {msg}")
+                            st.balloons()
+                            st.rerun()
+                        else:
+                            st.error(f"❌ Auto-trade failed: {msg}")
+    
+    else:
+        # No signals generated yet
+        st.info("""
+        ### 📊 Signal Generation Ready
+        
+        Click **"Generate Trading Signals"** to scan the market for opportunities.
+        
+        The scanner will:
+        1. Analyze technical indicators (EMA, RSI, MACD, Bollinger Bands)
+        2. Check volume patterns
+        3. Identify support/resistance levels
+        4. Generate confidence scores for each signal
+        5. Filter by minimum confidence threshold
+        
+        **Requirements:**
+        - Market must be open for live signals
+        - Stock data available (15m interval)
+        - Minimum 50 data points per stock
+        """)
+        
+        # Quick stats
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Market Status", "OPEN" if market_open() else "CLOSED")
+        with col2:
+            st.metric("Peak Hours", "YES" if is_peak_market_hours() else "NO")
+        with col3:
+            st.metric("Signals Generated", trader.signal_generator.signals_generated)
+
+# ===================== UPDATE ALGO ENGINE =====================
+# Add this method to the AlgoEngine class:
+
+def process_signals(self, signals):
+    """Process generated signals for algo trading"""
+    if self.state != AlgoState.RUNNING:
+        return []
+    
+    executed_signals = []
+    
+    for signal in signals:
+        # Check if we already have position in this symbol
+        if signal['symbol'] in self.active_positions:
+            continue
+        
+        # Check risk limits
+        if len(self.active_positions) >= self.risk_limits.max_positions:
+            logger.info("Max positions limit reached")
+            break
+        
+        if self.stats.trades_today >= self.risk_limits.max_trades_per_day:
+            logger.info("Daily trade limit reached")
+            break
+        
+        # Check confidence threshold
+        if signal['confidence'] < self.risk_limits.min_confidence:
+            continue
+        
+        # Execute trade through trader
+        if self.trader:
+            success, msg = self.trader.execute_auto_trade_from_signal(signal)
+            
+            if success:
+                # Create algo order record
+                order_id = f"ALGO_{signal['symbol']}_{int(time.time())}"
+                order = AlgoOrder(
+                    order_id=order_id,
+                    symbol=signal['symbol'],
+                    action=signal['action'],
+                    quantity=signal.get('quantity', 10),
+                    price=signal['price'],
+                    stop_loss=signal['stop_loss'],
+                    target=signal['target'],
+                    strategy=signal['strategy'],
+                    confidence=signal['confidence'],
+                    status=OrderStatus.PLACED,
+                    placed_at=datetime.now()
+                )
+                
+                self.orders[order_id] = order
+                self.active_positions[signal['symbol']] = order
+                self.order_history.append(order)
+                
+                self.stats.total_orders += 1
+                self.stats.trades_today += 1
+                
+                executed_signals.append(signal)
+                
+                logger.info(f"Algo executed: {signal['symbol']} {signal['action']}")
+    
+    return executed_signals
+
+# ===================== UPDATE SESSION STATE INIT =====================
+# Add these session state initializations:
+if 'generated_signals' not in st.session_state: st.session_state.generated_signals = []
+if 'signal_quality' not in st.session_state: st.session_state.signal_quality = 0
+
 
 # ===================== PART 9: KITE LIVE CHARTS =====================
 def create_kite_live_charts(kite_manager):
