@@ -13,7 +13,11 @@ from enum import Enum
 import logging
 import json
 import pytz
+from kiteconnect import KiteConnect
 
+kite = KiteConnect(api_key=os.getenv('KITE_API_KEY'))
+print(kite.login_url())
+# Use the URL to login and get request_token
 logger = logging.getLogger(__name__)
 
 IND_TZ = pytz.timezone("Asia/Kolkata")
