@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, time as dt_time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable, Tuple
 from enum import Enum
+import random
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -29,21 +30,7 @@ from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 import warnings
 import re
-import random
-from scipy import stats
-import talib  # Add this import
 
-# Add after the imports section
-try:
-    import talib
-    TALIB_AVAILABLE = True
-except ImportError:
-    if install_package("TA-Lib"):
-        import talib
-        TALIB_AVAILABLE = True
-    else:
-        TALIB_AVAILABLE = False
-        st.warning("TA-Lib not available. Using custom indicators.")
 # Auto-install missing dependencies
 def install_package(package_name):
     try:
@@ -56,6 +43,7 @@ def install_package(package_name):
 KITECONNECT_AVAILABLE = False
 SQLALCHEMY_AVAILABLE = False
 JOBLIB_AVAILABLE = False
+TALIB_AVAILABLE = False
 
 try:
     from kiteconnect import KiteConnect, KiteTicker
@@ -82,6 +70,20 @@ except ImportError:
     if install_package("joblib"):
         import joblib
         JOBLIB_AVAILABLE = True
+
+try:
+    import talib
+    TALIB_AVAILABLE = True
+except ImportError:
+    if install_package("TA-Lib"):
+        try:
+            import talib
+            TALIB_AVAILABLE = True
+        except:
+            TALIB_AVAILABLE = False
+            st.warning("TA-Lib not available. Using custom indicators.")
+    else:
+        TALIB_AVAILABLE = False
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -477,6 +479,8 @@ if 'api_key_input' not in st.session_state: st.session_state.api_key_input = ""
 if 'api_secret_input' not in st.session_state: st.session_state.api_secret_input = ""
 if 'request_token_input' not in st.session_state: st.session_state.request_token_input = ""
 if 'login_url_generated' not in st.session_state: st.session_state.login_url_generated = None
+if 'generated_signals' not in st.session_state: st.session_state.generated_signals = []
+if 'signal_quality' not in st.session_state: st.session_state.signal_quality = 0
 
 # ===================== PART 4: UTILITY FUNCTIONS =====================
 def now_indian():
@@ -969,6 +973,65 @@ class AlgoEngine:
         if total_pnl < -self.risk_limits.max_daily_loss:
             self.emergency_stop(f"Daily loss limit exceeded: ₹{total_pnl:.2f}")
     
+    def process_signals(self, signals):
+        """Process generated signals for algo trading"""
+        if self.state != AlgoState.RUNNING:
+            return []
+        
+        executed_signals = []
+        
+        for signal in signals:
+            # Check if we already have position in this symbol
+            if signal['symbol'] in self.active_positions:
+                continue
+            
+            # Check risk limits
+            if len(self.active_positions) >= self.risk_limits.max_positions:
+                logger.info("Max positions limit reached")
+                break
+            
+            if self.stats.trades_today >= self.risk_limits.max_trades_per_day:
+                logger.info("Daily trade limit reached")
+                break
+            
+            # Check confidence threshold
+            if signal['confidence'] < self.risk_limits.min_confidence:
+                continue
+            
+            # Execute trade through trader
+            if self.trader:
+                success, msg = self.trader.execute_auto_trade_from_signal(signal)
+                
+                if success:
+                    # Create algo order record
+                    order_id = f"ALGO_{signal['symbol']}_{int(time.time())}"
+                    order = AlgoOrder(
+                        order_id=order_id,
+                        symbol=signal['symbol'],
+                        action=signal['action'],
+                        quantity=signal.get('quantity', 10),
+                        price=signal['price'],
+                        stop_loss=signal['stop_loss'],
+                        target=signal['target'],
+                        strategy=signal['strategy'],
+                        confidence=signal['confidence'],
+                        status=OrderStatus.PLACED,
+                        placed_at=datetime.now()
+                    )
+                    
+                    self.orders[order_id] = order
+                    self.active_positions[signal['symbol']] = order
+                    self.order_history.append(order)
+                    
+                    self.stats.total_orders += 1
+                    self.stats.trades_today += 1
+                    
+                    executed_signals.append(signal)
+                    
+                    logger.info(f"Algo executed: {signal['symbol']} {signal['action']}")
+        
+        return executed_signals
+    
     def get_status(self) -> dict:
         return {
             "state": self.state.value,
@@ -1098,7 +1161,8 @@ class MultiStrategyIntradayTrader:
             self.strategy_performance[strategy] = {"signals": 0, "trades": 0, "wins": 0, "pnl": 0.0}
         
         self.data_manager = EnhancedDataManager()
-
+        self.signal_generator = SignalGenerator(self.data_manager)
+        
     def reset_daily_counts(self):
         current_date = now_indian().date()
         if current_date != self.last_reset:
@@ -1169,6 +1233,48 @@ class MultiStrategyIntradayTrader:
             self.strategy_performance[strategy]["trades"] += 1
 
         return True, f"{'[AUTO] ' if auto_trade else ''}{action} {int(quantity)} {symbol} @ ₹{price:.2f} | Strategy: {strategy}"
+
+    def execute_auto_trade_from_signal(self, signal, max_quantity=50):
+        """Execute auto trade based on generated signal"""
+        if not self.can_auto_trade():
+            return False, "Auto trading limits reached"
+        
+        symbol = signal['symbol']
+        action = signal['action']
+        price = signal['price']
+        stop_loss = signal['stop_loss']
+        target = signal['target']
+        strategy = signal['strategy']
+        confidence = signal['confidence']
+        
+        # Calculate position size based on confidence and risk
+        position_size_pct = min(0.2, confidence * 0.25)  # Max 20% per trade
+        max_trade_value = self.cash * position_size_pct
+        quantity = int(max_trade_value / price)
+        
+        # Apply limits
+        quantity = min(quantity, max_quantity)
+        
+        if quantity < 1:
+            return False, "Position size too small"
+        
+        # Execute trade
+        success, msg = self.execute_trade(
+            symbol=symbol,
+            action=action,
+            quantity=quantity,
+            price=price,
+            stop_loss=stop_loss,
+            target=target,
+            win_probability=signal['win_probability'],
+            auto_trade=True,
+            strategy=strategy
+        )
+        
+        if success:
+            logger.info(f"Auto trade executed: {msg}")
+        
+        return success, msg
 
     def update_positions_pnl(self):
         if should_auto_close() and not self.auto_close_triggered:
@@ -1799,410 +1905,6 @@ class SignalGenerator:
         
         return signals
 
-# ===================== UPDATE MULTISTRATEGYINTRADAYTRADER =====================
-# Add this method to the MultiStrategyIntradayTrader class:
-
-def execute_auto_trade_from_signal(self, signal, max_quantity=50):
-    """Execute auto trade based on generated signal"""
-    if not self.can_auto_trade():
-        return False, "Auto trading limits reached"
-    
-    symbol = signal['symbol']
-    action = signal['action']
-    price = signal['price']
-    stop_loss = signal['stop_loss']
-    target = signal['target']
-    strategy = signal['strategy']
-    confidence = signal['confidence']
-    
-    # Calculate position size based on confidence and risk
-    position_size_pct = min(0.2, confidence * 0.25)  # Max 20% per trade
-    max_trade_value = self.cash * position_size_pct
-    quantity = int(max_trade_value / price)
-    
-    # Apply limits
-    quantity = min(quantity, max_quantity)
-    
-    if quantity < 1:
-        return False, "Position size too small"
-    
-    # Execute trade
-    success, msg = self.execute_trade(
-        symbol=symbol,
-        action=action,
-        quantity=quantity,
-        price=price,
-        stop_loss=stop_loss,
-        target=target,
-        win_probability=signal['win_probability'],
-        auto_trade=True,
-        strategy=strategy
-    )
-    
-    if success:
-        logger.info(f"Auto trade executed: {msg}")
-    
-    return success, msg
-
-# Add this to the MultiStrategyIntradayTrader __init__ method:
-self.signal_generator = SignalGenerator(self.data_manager)
-
-# ===================== UPDATE SIGNALS TAB =====================
-# Replace the Signals tab content with:
-
-with tabs[1]:
-    st.subheader("📊 Multi-Strategy Signal Scanner")
-    
-    # Signal generator controls
-    col1, col2, col3 = st.columns([2, 1, 1])
-    
-    with col1:
-        scan_mode = st.radio(
-            "Scan Mode",
-            ["Quick Scan (Top 30)", "Full Universe Scan"],
-            horizontal=True,
-            key="scan_mode"
-        )
-    
-    with col2:
-        min_confidence = st.slider(
-            "Min Confidence",
-            min_value=0.60,
-            max_value=0.95,
-            value=0.70,
-            step=0.05,
-            key="min_conf_signal"
-        )
-    
-    with col3:
-        max_signals = st.number_input(
-            "Max Signals",
-            min_value=1,
-            max_value=20,
-            value=10,
-            key="max_signals_input"
-        )
-    
-    # Generate signals button
-    if st.button("🚀 Generate Trading Signals", type="primary", key="generate_signals_btn"):
-        st.session_state.last_signal_generation = time.time()
-        
-        with st.spinner(f"Scanning {universe} for trading signals..."):
-            # Determine scan size
-            scan_size = 30 if scan_mode == "Quick Scan (Top 30)" else 100
-            
-            # Generate signals
-            signals = trader.signal_generator.scan_stock_universe(
-                universe=universe,
-                max_stocks=scan_size,
-                min_confidence=min_confidence
-            )
-            
-            # Store in session state
-            st.session_state.generated_signals = signals[:max_signals]
-            st.session_state.signal_quality = trader.signal_generator.calculate_signal_quality(signals)
-            
-            st.success(f"✅ Generated {len(signals)} signals (showing top {min(max_signals, len(signals))})")
-    
-    # Display signals if available
-    if 'generated_signals' in st.session_state and st.session_state.generated_signals:
-        signals = st.session_state.generated_signals
-        
-        # Signal quality indicator
-        quality = st.session_state.get('signal_quality', 0)
-        
-        if quality >= 70:
-            quality_class = "high-quality-signal"
-            quality_text = "HIGH QUALITY"
-        elif quality >= 50:
-            quality_class = "medium-quality-signal"
-            quality_text = "MEDIUM QUALITY"
-        else:
-            quality_class = "alert-warning"
-            quality_text = "LOW QUALITY"
-        
-        st.markdown(f"""
-        <div class="{quality_class}">
-            <strong>📊 Signal Quality: {quality_text}</strong> | 
-            Score: {quality:.1f}/100 | 
-            Generated: {trader.signal_generator.last_scan_time.strftime('%H:%M:%S') if trader.signal_generator.last_scan_time else 'N/A'}
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Display signals in a table
-        signal_data = []
-        for i, signal in enumerate(signals):
-            signal_data.append({
-                "#": i+1,
-                "Symbol": signal['symbol'].replace('.NS', ''),
-                "Action": f"{'🟢 BUY' if signal['action'] == 'BUY' else '🔴 SELL'}",
-                "Price": f"₹{signal['price']:.2f}",
-                "Stop Loss": f"₹{signal['stop_loss']:.2f}",
-                "Target": f"₹{signal['target']:.2f}",
-                "Confidence": f"{signal['confidence']:.1%}",
-                "Score": signal['score'],
-                "Win Prob": f"{signal['win_probability']:.1%}",
-                "Strategy": signal['strategy'],
-                "RSI": f"{signal.get('rsi', 0):.1f}"
-            })
-        
-        # Create dataframe
-        df_signals = pd.DataFrame(signal_data)
-        
-        # Display with formatting
-        st.dataframe(
-            df_signals,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Action": st.column_config.TextColumn(width="small"),
-                "Confidence": st.column_config.ProgressColumn(
-                    format="%.1f%%",
-                    min_value=0,
-                    max_value=1.0
-                ),
-                "Win Prob": st.column_config.ProgressColumn(
-                    format="%.1f%%",
-                    min_value=0,
-                    max_value=1.0
-                )
-            }
-        )
-        
-        # Auto-trade controls
-        st.subheader("🤖 Auto-Trade Execution")
-        
-        if not trader.auto_execution:
-            st.warning("Auto execution is disabled. Enable in sidebar to auto-trade.")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            if st.button("📈 Execute All BUY Signals", type="secondary", 
-                        disabled=not trader.auto_execution or not market_open()):
-                executed = 0
-                for signal in [s for s in signals if s['action'] == 'BUY']:
-                    success, msg = trader.execute_auto_trade_from_signal(signal)
-                    if success:
-                        executed += 1
-                        st.success(f"Executed: {signal['symbol']}")
-                    else:
-                        st.warning(f"Failed: {signal['symbol']} - {msg}")
-                
-                if executed > 0:
-                    st.balloons()
-                    st.success(f"Executed {executed} BUY signals!")
-                    st.rerun()
-        
-        with col2:
-            if st.button("📉 Execute All SELL Signals", type="secondary",
-                        disabled=not trader.auto_execution or not market_open()):
-                executed = 0
-                for signal in [s for s in signals if s['action'] == 'SELL']:
-                    success, msg = trader.execute_auto_trade_from_signal(signal)
-                    if success:
-                        executed += 1
-                        st.success(f"Executed: {signal['symbol']}")
-                    else:
-                        st.warning(f"Failed: {signal['symbol']} - {msg}")
-                
-                if executed > 0:
-                    st.balloons()
-                    st.success(f"Executed {executed} SELL signals!")
-                    st.rerun()
-        
-        with col3:
-            if st.button("🎯 Execute Top 3 Signals", type="primary",
-                        disabled=not trader.auto_execution or not market_open()):
-                executed = 0
-                for signal in signals[:3]:
-                    success, msg = trader.execute_auto_trade_from_signal(signal)
-                    if success:
-                        executed += 1
-                        st.success(f"Executed: {signal['symbol']}")
-                    else:
-                        st.warning(f"Failed: {signal['symbol']} - {msg}")
-                
-                if executed > 0:
-                    st.balloons()
-                    st.success(f"Executed {executed} signals!")
-                    st.rerun()
-        
-        # Manual trade execution for individual signals
-        st.subheader("🎯 Manual Signal Execution")
-        
-        selected_signal_idx = st.selectbox(
-            "Select Signal to Trade",
-            range(len(signals)),
-            format_func=lambda x: f"{signals[x]['symbol'].replace('.NS', '')} - {signals[x]['action']} @ ₹{signals[x]['price']:.2f} ({signals[x]['confidence']:.1%})",
-            key="signal_select"
-        )
-        
-        if selected_signal_idx is not None:
-            selected_signal = signals[selected_signal_idx]
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("Action", selected_signal['action'])
-            with col2:
-                st.metric("Price", f"₹{selected_signal['price']:.2f}")
-            with col3:
-                st.metric("Confidence", f"{selected_signal['confidence']:.1%}")
-            with col4:
-                st.metric("Win Probability", f"{selected_signal['win_probability']:.1%}")
-            
-            st.markdown(f"""
-            **Strategy:** {selected_signal['strategy']}  
-            **Stop Loss:** ₹{selected_signal['stop_loss']:.2f} ({abs(selected_signal['price'] - selected_signal['stop_loss']):.2f} points)  
-            **Target:** ₹{selected_signal['target']:.2f} ({abs(selected_signal['target'] - selected_signal['price']):.2f} points)  
-            **Risk/Reward:** 1:{abs((selected_signal['target'] - selected_signal['price']) / (selected_signal['price'] - selected_signal['stop_loss'])):.2f}
-            """)
-            
-            # Manual execution controls
-            exec_col1, exec_col2 = st.columns([1, 2])
-            
-            with exec_col1:
-                quantity = st.number_input(
-                    "Quantity",
-                    min_value=1,
-                    max_value=100,
-                    value=min(10, int(trader.cash * 0.1 / selected_signal['price'])),
-                    key="signal_quantity"
-                )
-            
-            with exec_col2:
-                exec_col2a, exec_col2b = st.columns(2)
-                with exec_col2a:
-                    if st.button("📈 Execute Trade", type="primary", key="execute_signal_trade"):
-                        success, msg = trader.execute_trade(
-                            symbol=selected_signal['symbol'],
-                            action=selected_signal['action'],
-                            quantity=quantity,
-                            price=selected_signal['price'],
-                            stop_loss=selected_signal['stop_loss'],
-                            target=selected_signal['target'],
-                            win_probability=selected_signal['win_probability'],
-                            auto_trade=False,
-                            strategy=selected_signal['strategy']
-                        )
-                        
-                        if success:
-                            st.success(f"✅ {msg}")
-                            st.balloons()
-                            st.rerun()
-                        else:
-                            st.error(f"❌ {msg}")
-                
-                with exec_col2b:
-                    if st.button("🤖 Auto-Trade This", type="secondary", key="auto_trade_signal",
-                                disabled=not trader.auto_execution):
-                        success, msg = trader.execute_auto_trade_from_signal(selected_signal)
-                        
-                        if success:
-                            st.success(f"✅ Auto-trade executed: {msg}")
-                            st.balloons()
-                            st.rerun()
-                        else:
-                            st.error(f"❌ Auto-trade failed: {msg}")
-    
-    else:
-        # No signals generated yet
-        st.info("""
-        ### 📊 Signal Generation Ready
-        
-        Click **"Generate Trading Signals"** to scan the market for opportunities.
-        
-        The scanner will:
-        1. Analyze technical indicators (EMA, RSI, MACD, Bollinger Bands)
-        2. Check volume patterns
-        3. Identify support/resistance levels
-        4. Generate confidence scores for each signal
-        5. Filter by minimum confidence threshold
-        
-        **Requirements:**
-        - Market must be open for live signals
-        - Stock data available (15m interval)
-        - Minimum 50 data points per stock
-        """)
-        
-        # Quick stats
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Market Status", "OPEN" if market_open() else "CLOSED")
-        with col2:
-            st.metric("Peak Hours", "YES" if is_peak_market_hours() else "NO")
-        with col3:
-            st.metric("Signals Generated", trader.signal_generator.signals_generated)
-
-# ===================== UPDATE ALGO ENGINE =====================
-# Add this method to the AlgoEngine class:
-
-def process_signals(self, signals):
-    """Process generated signals for algo trading"""
-    if self.state != AlgoState.RUNNING:
-        return []
-    
-    executed_signals = []
-    
-    for signal in signals:
-        # Check if we already have position in this symbol
-        if signal['symbol'] in self.active_positions:
-            continue
-        
-        # Check risk limits
-        if len(self.active_positions) >= self.risk_limits.max_positions:
-            logger.info("Max positions limit reached")
-            break
-        
-        if self.stats.trades_today >= self.risk_limits.max_trades_per_day:
-            logger.info("Daily trade limit reached")
-            break
-        
-        # Check confidence threshold
-        if signal['confidence'] < self.risk_limits.min_confidence:
-            continue
-        
-        # Execute trade through trader
-        if self.trader:
-            success, msg = self.trader.execute_auto_trade_from_signal(signal)
-            
-            if success:
-                # Create algo order record
-                order_id = f"ALGO_{signal['symbol']}_{int(time.time())}"
-                order = AlgoOrder(
-                    order_id=order_id,
-                    symbol=signal['symbol'],
-                    action=signal['action'],
-                    quantity=signal.get('quantity', 10),
-                    price=signal['price'],
-                    stop_loss=signal['stop_loss'],
-                    target=signal['target'],
-                    strategy=signal['strategy'],
-                    confidence=signal['confidence'],
-                    status=OrderStatus.PLACED,
-                    placed_at=datetime.now()
-                )
-                
-                self.orders[order_id] = order
-                self.active_positions[signal['symbol']] = order
-                self.order_history.append(order)
-                
-                self.stats.total_orders += 1
-                self.stats.trades_today += 1
-                
-                executed_signals.append(signal)
-                
-                logger.info(f"Algo executed: {signal['symbol']} {signal['action']}")
-    
-    return executed_signals
-
-# ===================== UPDATE SESSION STATE INIT =====================
-# Add these session state initializations:
-if 'generated_signals' not in st.session_state: st.session_state.generated_signals = []
-if 'signal_quality' not in st.session_state: st.session_state.signal_quality = 0
-
-
 # ===================== PART 9: KITE LIVE CHARTS =====================
 def create_kite_live_charts(kite_manager):
     """Create Kite Connect Live Charts Tab"""
@@ -2706,6 +2408,7 @@ def main():
         st.write(f"✅ Kite Connect: {'Available' if KITECONNECT_AVAILABLE else 'Not Available'}")
         st.write(f"✅ Database: {'Available' if SQLALCHEMY_AVAILABLE else 'Not Available'}")
         st.write(f"✅ ML Support: {'Available' if JOBLIB_AVAILABLE else 'Not Available'}")
+        st.write(f"✅ TA-Lib: {'Available' if TALIB_AVAILABLE else 'Not Available'}")
         st.write(f"✅ Algo Engine: {'Ready' if algo_engine else 'Not Initialized'}")
         st.write(f"🔄 Refresh Count: {st.session_state.refresh_count}")
         st.write(f"📊 Market: {'Open' if market_open() else 'Closed'}")
@@ -2859,22 +2562,291 @@ def main():
         else:
             st.info("No open positions")
     
-    # Tab 2: Signals
+    # Tab 2: Signals - UPDATED WITH SIGNAL GENERATOR
     with tabs[1]:
-        st.subheader("Multi-Strategy BUY/SELL Signals")
+        st.subheader("📊 Multi-Strategy Signal Scanner")
         
-        col1, col2, col3 = st.columns([1, 2, 1])
+        # Signal generator controls
+        col1, col2, col3 = st.columns([2, 1, 1])
+        
         with col1:
-            if st.button("Generate Signals", type="primary", key="generate_signals_btn"):
-                st.session_state.last_signal_generation = time.time()
-                with st.spinner(f"Scanning {universe} stocks..."):
-                    time.sleep(2)
-                    st.success(f"✅ Scan completed for {universe}")
-                    st.info("Signal generation logic would be implemented here")
+            scan_mode = st.radio(
+                "Scan Mode",
+                ["Quick Scan (Top 30)", "Full Universe Scan"],
+                horizontal=True,
+                key="scan_mode"
+            )
         
-        # Signal Display Area
-        st.subheader("Live Signals")
-        st.info("No live signals available. Click 'Generate Signals' to scan the market.")
+        with col2:
+            min_confidence = st.slider(
+                "Min Confidence",
+                min_value=0.60,
+                max_value=0.95,
+                value=0.70,
+                step=0.05,
+                key="min_conf_signal"
+            )
+        
+        with col3:
+            max_signals = st.number_input(
+                "Max Signals",
+                min_value=1,
+                max_value=20,
+                value=10,
+                key="max_signals_input"
+            )
+        
+        # Generate signals button
+        if st.button("🚀 Generate Trading Signals", type="primary", key="generate_signals_btn"):
+            st.session_state.last_signal_generation = time.time()
+            
+            with st.spinner(f"Scanning {universe} for trading signals..."):
+                # Determine scan size
+                scan_size = 30 if scan_mode == "Quick Scan (Top 30)" else 100
+                
+                # Generate signals
+                signals = trader.signal_generator.scan_stock_universe(
+                    universe=universe,
+                    max_stocks=scan_size,
+                    min_confidence=min_confidence
+                )
+                
+                # Store in session state
+                st.session_state.generated_signals = signals[:max_signals]
+                st.session_state.signal_quality = trader.signal_generator.calculate_signal_quality(signals)
+                
+                st.success(f"✅ Generated {len(signals)} signals (showing top {min(max_signals, len(signals))})")
+        
+        # Display signals if available
+        if 'generated_signals' in st.session_state and st.session_state.generated_signals:
+            signals = st.session_state.generated_signals
+            
+            # Signal quality indicator
+            quality = st.session_state.get('signal_quality', 0)
+            
+            if quality >= 70:
+                quality_class = "high-quality-signal"
+                quality_text = "HIGH QUALITY"
+            elif quality >= 50:
+                quality_class = "medium-quality-signal"
+                quality_text = "MEDIUM QUALITY"
+            else:
+                quality_class = "alert-warning"
+                quality_text = "LOW QUALITY"
+            
+            st.markdown(f"""
+            <div class="{quality_class}">
+                <strong>📊 Signal Quality: {quality_text}</strong> | 
+                Score: {quality:.1f}/100 | 
+                Generated: {trader.signal_generator.last_scan_time.strftime('%H:%M:%S') if trader.signal_generator.last_scan_time else 'N/A'}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Display signals in a table
+            signal_data = []
+            for i, signal in enumerate(signals):
+                signal_data.append({
+                    "#": i+1,
+                    "Symbol": signal['symbol'].replace('.NS', ''),
+                    "Action": f"{'🟢 BUY' if signal['action'] == 'BUY' else '🔴 SELL'}",
+                    "Price": f"₹{signal['price']:.2f}",
+                    "Stop Loss": f"₹{signal['stop_loss']:.2f}",
+                    "Target": f"₹{signal['target']:.2f}",
+                    "Confidence": f"{signal['confidence']:.1%}",
+                    "Score": signal['score'],
+                    "Win Prob": f"{signal['win_probability']:.1%}",
+                    "Strategy": signal['strategy'],
+                    "RSI": f"{signal.get('rsi', 0):.1f}"
+                })
+            
+            # Create dataframe
+            df_signals = pd.DataFrame(signal_data)
+            
+            # Display with formatting
+            st.dataframe(
+                df_signals,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Action": st.column_config.TextColumn(width="small"),
+                    "Confidence": st.column_config.ProgressColumn(
+                        format="%.1f%%",
+                        min_value=0,
+                        max_value=1.0
+                    ),
+                    "Win Prob": st.column_config.ProgressColumn(
+                        format="%.1f%%",
+                        min_value=0,
+                        max_value=1.0
+                    )
+                }
+            )
+            
+            # Auto-trade controls
+            st.subheader("🤖 Auto-Trade Execution")
+            
+            if not trader.auto_execution:
+                st.warning("Auto execution is disabled. Enable in sidebar to auto-trade.")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("📈 Execute All BUY Signals", type="secondary", 
+                            disabled=not trader.auto_execution or not market_open()):
+                    executed = 0
+                    for signal in [s for s in signals if s['action'] == 'BUY']:
+                        success, msg = trader.execute_auto_trade_from_signal(signal)
+                        if success:
+                            executed += 1
+                            st.success(f"Executed: {signal['symbol']}")
+                        else:
+                            st.warning(f"Failed: {signal['symbol']} - {msg}")
+                    
+                    if executed > 0:
+                        st.balloons()
+                        st.success(f"Executed {executed} BUY signals!")
+                        st.rerun()
+            
+            with col2:
+                if st.button("📉 Execute All SELL Signals", type="secondary",
+                            disabled=not trader.auto_execution or not market_open()):
+                    executed = 0
+                    for signal in [s for s in signals if s['action'] == 'SELL']:
+                        success, msg = trader.execute_auto_trade_from_signal(signal)
+                        if success:
+                            executed += 1
+                            st.success(f"Executed: {signal['symbol']}")
+                        else:
+                            st.warning(f"Failed: {signal['symbol']} - {msg}")
+                    
+                    if executed > 0:
+                        st.balloons()
+                        st.success(f"Executed {executed} SELL signals!")
+                        st.rerun()
+            
+            with col3:
+                if st.button("🎯 Execute Top 3 Signals", type="primary",
+                            disabled=not trader.auto_execution or not market_open()):
+                    executed = 0
+                    for signal in signals[:3]:
+                        success, msg = trader.execute_auto_trade_from_signal(signal)
+                        if success:
+                            executed += 1
+                            st.success(f"Executed: {signal['symbol']}")
+                        else:
+                            st.warning(f"Failed: {signal['symbol']} - {msg}")
+                    
+                    if executed > 0:
+                        st.balloons()
+                        st.success(f"Executed {executed} signals!")
+                        st.rerun()
+            
+            # Manual trade execution for individual signals
+            st.subheader("🎯 Manual Signal Execution")
+            
+            selected_signal_idx = st.selectbox(
+                "Select Signal to Trade",
+                range(len(signals)),
+                format_func=lambda x: f"{signals[x]['symbol'].replace('.NS', '')} - {signals[x]['action']} @ ₹{signals[x]['price']:.2f} ({signals[x]['confidence']:.1%})",
+                key="signal_select"
+            )
+            
+            if selected_signal_idx is not None:
+                selected_signal = signals[selected_signal_idx]
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("Action", selected_signal['action'])
+                with col2:
+                    st.metric("Price", f"₹{selected_signal['price']:.2f}")
+                with col3:
+                    st.metric("Confidence", f"{selected_signal['confidence']:.1%}")
+                with col4:
+                    st.metric("Win Probability", f"{selected_signal['win_probability']:.1%}")
+                
+                st.markdown(f"""
+                **Strategy:** {selected_signal['strategy']}  
+                **Stop Loss:** ₹{selected_signal['stop_loss']:.2f} ({abs(selected_signal['price'] - selected_signal['stop_loss']):.2f} points)  
+                **Target:** ₹{selected_signal['target']:.2f} ({abs(selected_signal['target'] - selected_signal['price']):.2f} points)  
+                **Risk/Reward:** 1:{abs((selected_signal['target'] - selected_signal['price']) / (selected_signal['price'] - selected_signal['stop_loss'])):.2f}
+                """)
+                
+                # Manual execution controls
+                exec_col1, exec_col2 = st.columns([1, 2])
+                
+                with exec_col1:
+                    quantity = st.number_input(
+                        "Quantity",
+                        min_value=1,
+                        max_value=100,
+                        value=min(10, int(trader.cash * 0.1 / selected_signal['price'])),
+                        key="signal_quantity"
+                    )
+                
+                with exec_col2:
+                    exec_col2a, exec_col2b = st.columns(2)
+                    with exec_col2a:
+                        if st.button("📈 Execute Trade", type="primary", key="execute_signal_trade"):
+                            success, msg = trader.execute_trade(
+                                symbol=selected_signal['symbol'],
+                                action=selected_signal['action'],
+                                quantity=quantity,
+                                price=selected_signal['price'],
+                                stop_loss=selected_signal['stop_loss'],
+                                target=selected_signal['target'],
+                                win_probability=selected_signal['win_probability'],
+                                auto_trade=False,
+                                strategy=selected_signal['strategy']
+                            )
+                            
+                            if success:
+                                st.success(f"✅ {msg}")
+                                st.balloons()
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {msg}")
+                    
+                    with exec_col2b:
+                        if st.button("🤖 Auto-Trade This", type="secondary", key="auto_trade_signal",
+                                    disabled=not trader.auto_execution):
+                            success, msg = trader.execute_auto_trade_from_signal(selected_signal)
+                            
+                            if success:
+                                st.success(f"✅ Auto-trade executed: {msg}")
+                                st.balloons()
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Auto-trade failed: {msg}")
+        
+        else:
+            # No signals generated yet
+            st.info("""
+            ### 📊 Signal Generation Ready
+            
+            Click **"Generate Trading Signals"** to scan the market for opportunities.
+            
+            The scanner will:
+            1. Analyze technical indicators (EMA, RSI, MACD, Bollinger Bands)
+            2. Check volume patterns
+            3. Identify support/resistance levels
+            4. Generate confidence scores for each signal
+            5. Filter by minimum confidence threshold
+            
+            **Requirements:**
+            - Market must be open for live signals
+            - Stock data available (15m interval)
+            - Minimum 50 data points per stock
+            """)
+            
+            # Quick stats
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Market Status", "OPEN" if market_open() else "CLOSED")
+            with col2:
+                st.metric("Peak Hours", "YES" if is_peak_market_hours() else "NO")
+            with col3:
+                st.metric("Signals Generated", trader.signal_generator.signals_generated)
     
     # Tab 3: Paper Trading
     with tabs[2]:
