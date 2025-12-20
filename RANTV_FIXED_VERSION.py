@@ -120,7 +120,7 @@ ALGO_MIN_CONFIDENCE = float(os.environ.get("ALGO_MIN_CONFIDENCE", "0.80"))
 # Email configuration for daily reports
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER", "your_email@gmail.com")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
-EMAIL_RECEIVER = "rant2002@gmail.com"
+EMAIL_RECEIVER = "rantv2002@gmail.com"
 
 @dataclass
 class AppConfig:
@@ -3039,7 +3039,7 @@ def create_algo_trading_tab(algo_engine):
         if algo_engine.trader:
             success = send_daily_report_email(algo_engine.trader, algo_engine)
             if success:
-                st.success("Daily report sent to rant2002@gmail.com")
+                st.success("Daily report sent to rantv2002@gmail.com")
             else:
                 st.error("Failed to send daily report")
         else:
@@ -3172,7 +3172,7 @@ def create_algo_trading_tab(algo_engine):
     <div class="alert-warning">
         <strong>⚠️ Important:</strong> Algorithmic trading involves significant risk. 
         The system will automatically exit all positions at 3:35 PM daily.
-        A detailed report will be sent to rant2002@gmail.com after market close.
+        A detailed report will be sent to rantv2002@gmail.com after market close.
         Always test with paper trading first. Set appropriate risk limits. 
         Monitor the system regularly. Past performance does not guarantee future results.
     </div>
@@ -3880,7 +3880,7 @@ def main():
     <div style="text-align: center; color: #6b7280; font-size: 12px;">
         <strong>Rantv Terminal Pro</strong> | Complete Trading Suite with Algo Engine & Live Charts | © 2024 | 
         Refresh: {st.session_state.refresh_count} | {now_indian().strftime("%H:%M:%S")} | 
-        Auto Exit: 3:35 PM | Daily Report: rant2002@gmail.com
+        Auto Exit: 3:35 PM | Daily Report: rantv2002@gmail.com
     </div>
     """, unsafe_allow_html=True)
 
