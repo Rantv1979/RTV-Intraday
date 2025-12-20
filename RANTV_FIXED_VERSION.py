@@ -15,11 +15,15 @@ import logging
 import json
 import pytz
 import traceback
+import smtplib
+import random
 from datetime import datetime, timedelta, time as dt_time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable, Tuple
 from enum import Enum
-import random
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import websocket
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -44,6 +48,7 @@ KITECONNECT_AVAILABLE = False
 SQLALCHEMY_AVAILABLE = False
 JOBLIB_AVAILABLE = False
 TALIB_AVAILABLE = False
+WEBSOCKET_AVAILABLE = False
 
 try:
     from kiteconnect import KiteConnect, KiteTicker
@@ -85,6 +90,18 @@ except ImportError:
     else:
         TALIB_AVAILABLE = False
 
+# Check for websocket-client
+try:
+    import websocket
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    if install_package("websocket-client"):
+        import websocket
+        WEBSOCKET_AVAILABLE = True
+    else:
+        WEBSOCKET_AVAILABLE = False
+        st.warning("websocket-client not available. Real-time features disabled.")
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -99,6 +116,11 @@ ALGO_ENABLED = os.environ.get("ALGO_TRADING_ENABLED", "false").lower() == "true"
 ALGO_MAX_POSITIONS = int(os.environ.get("ALGO_MAX_POSITIONS", "5"))
 ALGO_MAX_DAILY_LOSS = float(os.environ.get("ALGO_MAX_DAILY_LOSS", "50000"))
 ALGO_MIN_CONFIDENCE = float(os.environ.get("ALGO_MIN_CONFIDENCE", "0.80"))
+
+# Email configuration for daily reports
+EMAIL_SENDER = os.environ.get("EMAIL_SENDER", "your_email@gmail.com")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+EMAIL_RECEIVER = "rant2002@gmail.com"
 
 @dataclass
 class AppConfig:
@@ -201,14 +223,6 @@ TRADING_STRATEGIES = {
     "Bollinger_Rejection": {"name": "Bollinger Band Rejection", "weight": 2, "type": "SELL"},
     "MACD_Bearish": {"name": "MACD Bearish Crossover", "weight": 2, "type": "SELL"},
     "Trend_Reversal": {"name": "Trend Reversal", "weight": 2, "type": "SELL"}
-}
-
-HIGH_ACCURACY_STRATEGIES = {
-    "Multi_Confirmation": {"name": "Multi-Confirmation Ultra", "weight": 5, "type": "BOTH"},
-    "Enhanced_EMA_VWAP": {"name": "Enhanced EMA-VWAP", "weight": 4, "type": "BOTH"},
-    "Volume_Breakout": {"name": "Volume Weighted Breakout", "weight": 4, "type": "BOTH"},
-    "RSI_Divergence": {"name": "RSI Divergence", "weight": 3, "type": "BOTH"},
-    "MACD_Trend": {"name": "MACD Trend Momentum", "weight": 3, "type": "BOTH"}
 }
 
 # ===================== PART 2: CSS STYLING =====================
@@ -370,16 +384,6 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(255, 140, 0, 0.1);
     }
     
-    /* High Accuracy Strategy Cards - ORANGE */
-    .high-accuracy-card {
-        background: linear-gradient(135deg, #ff8c00 0%, #ff6b00 100%);
-        color: white;
-        padding: 15px;
-        border-radius: 10px;
-        border-left: 4px solid #f59e0b;
-        box-shadow: 0 4px 12px rgba(255, 140, 0, 0.3);
-    }
-    
     /* Alert Styles - ORANGE Theme */
     .alert-success {
         background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
@@ -481,6 +485,9 @@ if 'request_token_input' not in st.session_state: st.session_state.request_token
 if 'login_url_generated' not in st.session_state: st.session_state.login_url_generated = None
 if 'generated_signals' not in st.session_state: st.session_state.generated_signals = []
 if 'signal_quality' not in st.session_state: st.session_state.signal_quality = 0
+if 'kite_ticker' not in st.session_state: st.session_state.kite_ticker = None
+if 'algo_scheduler_started' not in st.session_state: st.session_state.algo_scheduler_started = False
+if 'last_email_sent' not in st.session_state: st.session_state.last_email_sent = None
 
 # ===================== PART 4: UTILITY FUNCTIONS =====================
 def now_indian():
@@ -500,6 +507,15 @@ def should_auto_close():
     try:
         auto_close_time = IND_TZ.localize(datetime.combine(n.date(), dt_time(15, 10)))
         return n >= auto_close_time
+    except Exception:
+        return False
+
+def should_exit_all_positions():
+    """Check if it's time to exit all positions (3:35 PM)"""
+    n = now_indian()
+    try:
+        exit_time = IND_TZ.localize(datetime.combine(n.date(), dt_time(15, 35)))
+        return n >= exit_time
     except Exception:
         return False
 
@@ -606,6 +622,401 @@ def create_circular_market_mood_gauge(index_name, current_value, change_percent,
     </div>
     """
     return gauge_html
+
+def send_daily_report_email(trader, algo_engine):
+    """Send daily trading report email"""
+    try:
+        if not EMAIL_SENDER or not EMAIL_PASSWORD:
+            logger.warning("Email credentials not configured")
+            return False
+        
+        # Check if email was already sent today
+        today = now_indian().date()
+        if st.session_state.last_email_sent == today:
+            logger.info("Daily report already sent today")
+            return True
+        
+        # Prepare email content
+        perf_stats = trader.get_performance_stats()
+        algo_stats = algo_engine.get_status() if algo_engine else {}
+        
+        # Get today's trades
+        today_trades = []
+        for trade in trader.trade_log:
+            trade_time = trade.get('timestamp')
+            if trade_time and trade_time.date() == today:
+                today_trades.append(trade)
+        
+        # Create HTML email
+        subject = f"Daily Trading Report - {today.strftime('%Y-%m-%d')}"
+        
+        html_content = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+            <h2 style="color: #ff8c00;">📊 Daily Trading Report</h2>
+            <p><strong>Date:</strong> {today.strftime('%Y-%m-%d')}</p>
+            
+            <h3 style="color: #333;">📈 Performance Summary</h3>
+            <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%;">
+                <tr style="background-color: #f2f2f2;">
+                    <th>Metric</th>
+                    <th>Value</th>
+                </tr>
+                <tr>
+                    <td>Total Trades</td>
+                    <td>{perf_stats['total_trades']}</td>
+                </tr>
+                <tr>
+                    <td>Win Rate</td>
+                    <td>{perf_stats['win_rate']:.1%}</td>
+                </tr>
+                <tr>
+                    <td>Total P&L</td>
+                    <td style="color: {'green' if perf_stats['total_pnl'] >= 0 else 'red'}">
+                        ₹{perf_stats['total_pnl']:+.2f}
+                    </td>
+                </tr>
+                <tr>
+                    <td>Open P&L</td>
+                    <td style="color: {'green' if perf_stats['open_pnl'] >= 0 else 'red'}">
+                        ₹{perf_stats['open_pnl']:+.2f}
+                    </td>
+                </tr>
+                <tr>
+                    <td>Average P&L per Trade</td>
+                    <td>₹{perf_stats['avg_pnl']:+.2f}</td>
+                </tr>
+                <tr>
+                    <td>Open Positions</td>
+                    <td>{perf_stats['open_positions']}</td>
+                </tr>
+                <tr>
+                    <td>Auto Trades</td>
+                    <td>{perf_stats['auto_trades']}</td>
+                </tr>
+            </table>
+            
+            <h3 style="color: #333;">🤖 Algo Engine Status</h3>
+            <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%;">
+                <tr style="background-color: #f2f2f2;">
+                    <th>Metric</th>
+                    <th>Value</th>
+                </tr>
+                <tr>
+                    <td>State</td>
+                    <td>{algo_stats.get('state', 'N/A')}</td>
+                </tr>
+                <tr>
+                    <td>Active Positions</td>
+                    <td>{algo_stats.get('active_positions', 0)}</td>
+                </tr>
+                <tr>
+                    <td>Total Orders</td>
+                    <td>{algo_stats.get('total_orders', 0)}</td>
+                </tr>
+                <tr>
+                    <td>Realized P&L</td>
+                    <td>₹{algo_stats.get('realized_pnl', 0):+.2f}</td>
+                </tr>
+                <tr>
+                    <td>Trades Today</td>
+                    <td>{algo_stats.get('trades_today', 0)}</td>
+                </tr>
+            </table>
+            
+            <h3 style="color: #333;">📋 Today's Trades ({len(today_trades)})</h3>
+        """
+        
+        if today_trades:
+            html_content += """
+            <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%;">
+                <tr style="background-color: #f2f2f2;">
+                    <th>Symbol</th>
+                    <th>Action</th>
+                    <th>Quantity</th>
+                    <th>Entry Price</th>
+                    <th>Exit Price</th>
+                    <th>P&L</th>
+                    <th>Strategy</th>
+                    <th>Auto</th>
+                </tr>
+            """
+            
+            for trade in today_trades:
+                pnl = trade.get('closed_pnl', trade.get('current_pnl', 0))
+                html_content += f"""
+                <tr>
+                    <td>{trade['symbol'].replace('.NS', '')}</td>
+                    <td>{trade['action']}</td>
+                    <td>{trade['quantity']}</td>
+                    <td>₹{trade['entry_price']:.2f}</td>
+                    <td>₹{trade.get('exit_price', trade.get('current_price', 0)):.2f}</td>
+                    <td style="color: {'green' if pnl >= 0 else 'red'}">₹{pnl:+.2f}</td>
+                    <td>{trade.get('strategy', 'Manual')}</td>
+                    <td>{'Yes' if trade.get('auto_trade') else 'No'}</td>
+                </tr>
+                """
+            
+            html_content += "</table>"
+        else:
+            html_content += "<p>No trades executed today.</p>"
+        
+        html_content += """
+            <hr>
+            <p style="color: #666; font-size: 12px;">
+                This is an automated daily report from Rantv Terminal Pro.<br>
+                Generated at: """ + now_indian().strftime("%Y-%m-%d %H:%M:%S") + """
+            </p>
+        </body>
+        </html>
+        """
+        
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = EMAIL_RECEIVER
+        
+        # Attach HTML
+        msg.attach(MIMEText(html_content, 'html'))
+        
+        # Send email
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+        
+        logger.info(f"Daily report email sent to {EMAIL_RECEIVER}")
+        st.session_state.last_email_sent = today
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to send daily report email: {e}")
+        return False
+
+# ===================== KITE LIVE TICKER =====================
+class KiteLiveTicker:
+    """Live WebSocket ticker for Kite Connect"""
+    
+    def __init__(self, kite_manager):
+        self.kite_manager = kite_manager
+        self.ws = None
+        self.tick_data = {}
+        self.subscribed_tokens = set()
+        self.is_connected = False
+        self.last_update = {}
+        self.candle_data = {}  # Store candle data for each token
+        self.thread = None
+        
+    def connect(self):
+        """Connect to Kite WebSocket"""
+        if not self.kite_manager.is_authenticated or not self.kite_manager.access_token:
+            return False
+            
+        try:
+            access_token = self.kite_manager.access_token
+            api_key = self.kite_manager.api_key
+            
+            # WebSocket URL
+            ws_url = f"wss://ws.kite.trade?api_key={api_key}&access_token={access_token}"
+            
+            self.ws = websocket.WebSocketApp(
+                ws_url,
+                on_open=self._on_open,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close
+            )
+            
+            # Start WebSocket in a separate thread
+            self.thread = threading.Thread(target=self.ws.run_forever)
+            self.thread.daemon = True
+            self.thread.start()
+            
+            self.is_connected = True
+            logger.info("Kite WebSocket connected")
+            return True
+            
+        except Exception as e:
+            logger.error(f"WebSocket connection error: {e}")
+            return False
+    
+    def disconnect(self):
+        """Disconnect WebSocket"""
+        if self.ws:
+            self.ws.close()
+        self.is_connected = False
+        self.subscribed_tokens.clear()
+        logger.info("Kite WebSocket disconnected")
+    
+    def _on_open(self, ws):
+        logger.info("WebSocket connection opened")
+        # Subscribe to default indices
+        self.subscribe([256265, 260105])  # NIFTY 50, BANKNIFTY
+    
+    def _on_message(self, ws, message):
+        try:
+            data = json.loads(message)
+            
+            if isinstance(data, dict) and 'type' in data:
+                if data['type'] == 'ticks':
+                    self._process_ticks(data)
+                elif data['type'] == 'order_update':
+                    logger.info(f"Order update: {data}")
+            
+        except Exception as e:
+            logger.error(f"WebSocket message error: {e}")
+    
+    def _process_ticks(self, data):
+        """Process tick data"""
+        ticks = data.get('ticks', [])
+        
+        for tick in ticks:
+            token = tick.get('instrument_token')
+            if not token:
+                continue
+                
+            # Store tick data
+            self.tick_data[token] = tick
+            self.last_update[token] = time.time()
+            
+            # Update candle data
+            self._update_candle_data(token, tick)
+    
+    def _update_candle_data(self, token, tick):
+        """Update candle data from ticks"""
+        if token not in self.candle_data:
+            self.candle_data[token] = {
+                'open': [],
+                'high': [],
+                'low': [],
+                'close': [],
+                'volume': [],
+                'timestamp': []
+            }
+        
+        current_time = time.time()
+        candle_interval = 60  # 1-minute candles
+        
+        # Get or create current candle
+        if not self.candle_data[token]['timestamp']:
+            # First candle
+            candle_start = current_time - (current_time % candle_interval)
+        else:
+            candle_start = self.candle_data[token]['timestamp'][-1]
+        
+        if current_time - candle_start >= candle_interval:
+            # Create new candle
+            new_candle_start = current_time - (current_time % candle_interval)
+            self.candle_data[token]['timestamp'].append(new_candle_start)
+            self.candle_data[token]['open'].append(tick.get('last_price', 0))
+            self.candle_data[token]['high'].append(tick.get('last_price', 0))
+            self.candle_data[token]['low'].append(tick.get('last_price', 0))
+            self.candle_data[token]['close'].append(tick.get('last_price', 0))
+            self.candle_data[token]['volume'].append(tick.get('volume_traded', 0))
+        else:
+            # Update current candle
+            if self.candle_data[token]['high']:
+                idx = -1
+                current_price = tick.get('last_price', 0)
+                
+                # Update high
+                if current_price > self.candle_data[token]['high'][idx]:
+                    self.candle_data[token]['high'][idx] = current_price
+                
+                # Update low
+                if current_price < self.candle_data[token]['low'][idx]:
+                    self.candle_data[token]['low'][idx] = current_price
+                
+                # Update close
+                self.candle_data[token]['close'][idx] = current_price
+                
+                # Update volume
+                self.candle_data[token]['volume'][idx] = tick.get('volume_traded', 0)
+    
+    def _on_error(self, ws, error):
+        logger.error(f"WebSocket error: {error}")
+    
+    def _on_close(self, ws, close_status_code, close_msg):
+        logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
+        self.is_connected = False
+        self.subscribed_tokens.clear()
+    
+    def subscribe(self, tokens):
+        """Subscribe to instruments"""
+        if not self.is_connected or not self.ws:
+            return False
+            
+        try:
+            # Add to subscription list
+            for token in tokens:
+                self.subscribed_tokens.add(token)
+            
+            # Send subscription message
+            subscribe_msg = {
+                "a": "subscribe",
+                "v": tokens
+            }
+            
+            self.ws.send(json.dumps(subscribe_msg))
+            logger.info(f"Subscribed to tokens: {tokens}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Subscription error: {e}")
+            return False
+    
+    def unsubscribe(self, tokens):
+        """Unsubscribe from instruments"""
+        if not self.is_connected or not self.ws:
+            return False
+            
+        try:
+            # Remove from subscription list
+            for token in tokens:
+                self.subscribed_tokens.discard(token)
+            
+            # Send unsubscribe message
+            unsubscribe_msg = {
+                "a": "unsubscribe",
+                "v": tokens
+            }
+            
+            self.ws.send(json.dumps(unsubscribe_msg))
+            logger.info(f"Unsubscribed from tokens: {tokens}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Unsubscribe error: {e}")
+            return False
+    
+    def get_latest_tick(self, token):
+        """Get latest tick for a token"""
+        return self.tick_data.get(token)
+    
+    def get_candle_data(self, token, num_candles=100):
+        """Get candle data for a token"""
+        if token not in self.candle_data:
+            return None
+        
+        data = self.candle_data[token]
+        if not data['timestamp']:
+            return None
+        
+        # Return last N candles
+        n = min(num_candles, len(data['timestamp']))
+        
+        return {
+            'timestamp': data['timestamp'][-n:],
+            'open': data['open'][-n:],
+            'high': data['high'][-n:],
+            'low': data['low'][-n:],
+            'close': data['close'][-n:],
+            'volume': data['volume'][-n:]
+        }
+    
+    def get_last_update_time(self, token):
+        """Get last update time for a token"""
+        return self.last_update.get(token, 0)
 
 # ===================== PART 5: KITE CONNECT MANAGER =====================
 class KiteConnectManager:
@@ -878,7 +1289,7 @@ class AlgoStats:
     trades_today: int = 0
 
 class AlgoEngine:
-    """Algorithmic Trading Engine"""
+    """Algorithmic Trading Engine with Daily Exit at 3:35 PM"""
     
     def __init__(self, trader=None):
         self.state = AlgoState.STOPPED
@@ -892,6 +1303,9 @@ class AlgoEngine:
         self._stop_event = threading.Event()
         self._scheduler_thread = None
         self._lock = threading.Lock()
+        
+        self.daily_exit_completed = False
+        self.last_signal_scan = 0
         
         logger.info("AlgoEngine initialized")
     
@@ -946,12 +1360,36 @@ class AlgoEngine:
                     time.sleep(10)
                     continue
                 
+                # Check if it's time to exit all positions (3:35 PM)
+                if should_exit_all_positions() and not self.daily_exit_completed:
+                    logger.info("3:35 PM - Exiting all positions")
+                    self._exit_all_positions()
+                    self.daily_exit_completed = True
+                    
+                    # Send daily report email
+                    if self.trader:
+                        send_daily_report_email(self.trader, self)
+                    
+                    time.sleep(60)  # Sleep for a minute after exit
+                    continue
+                
+                # Reset daily exit flag at market open
+                current_time = now_indian()
+                if current_time.hour == 9 and current_time.minute < 30:
+                    self.daily_exit_completed = False
+                
                 # Update positions P&L
                 if self.trader:
                     self.trader.update_positions_pnl()
                 
                 # Check risk limits
                 self._check_risk_limits()
+                
+                # Generate and process signals periodically
+                current_time_ts = time.time()
+                if current_time_ts - self.last_signal_scan > 300:  # Every 5 minutes
+                    self._scan_and_process_signals()
+                    self.last_signal_scan = current_time_ts
                 
                 time.sleep(5)
                 
@@ -960,6 +1398,70 @@ class AlgoEngine:
                 time.sleep(10)
         
         logger.info("Algo scheduler thread stopped")
+    
+    def _scan_and_process_signals(self):
+        """Scan for signals and process them"""
+        if not self.trader or not self.trader.signal_generator:
+            return
+        
+        try:
+            # Generate signals for Nifty 50
+            signals = self.trader.signal_generator.scan_stock_universe(
+                universe="Nifty 50",
+                max_stocks=30,
+                min_confidence=self.risk_limits.min_confidence
+            )
+            
+            # Process signals
+            if signals:
+                executed_signals = self.process_signals(signals)
+                if executed_signals:
+                    logger.info(f"Executed {len(executed_signals)} signals")
+        
+        except Exception as e:
+            logger.error(f"Error in signal scanning: {e}")
+    
+    def _exit_all_positions(self):
+        """Exit all active positions"""
+        if not self.trader:
+            return
+        
+        logger.info("Exiting all algo positions")
+        
+        # Close all positions through trader
+        for symbol in list(self.trader.positions.keys()):
+            try:
+                success, msg = self.trader.close_position(symbol)
+                if success:
+                    logger.info(f"Closed position: {symbol} - {msg}")
+                    
+                    # Update algo order status
+                    if symbol in self.active_positions:
+                        order = self.active_positions[symbol]
+                        order.status = OrderStatus.FILLED
+                        order.filled_at = now_indian()
+                        
+                        # Calculate P&L
+                        if order.filled_price:
+                            if order.action == "BUY":
+                                pnl = (order.filled_price - order.price) * order.quantity
+                            else:
+                                pnl = (order.price - order.filled_price) * order.quantity
+                            
+                            self.stats.realized_pnl += pnl
+                            self.stats.total_pnl += pnl
+                            
+                            if pnl > 0:
+                                self.stats.win_count += 1
+                            else:
+                                self.stats.loss_count += 1
+                else:
+                    logger.warning(f"Failed to close position: {symbol} - {msg}")
+            except Exception as e:
+                logger.error(f"Error closing position {symbol}: {e}")
+        
+        # Clear active positions
+        self.active_positions.clear()
     
     def _check_risk_limits(self):
         """Check if risk limits are breached"""
@@ -1041,7 +1543,8 @@ class AlgoEngine:
             "trades_today": self.stats.trades_today,
             "realized_pnl": self.stats.realized_pnl,
             "unrealized_pnl": self.stats.unrealized_pnl,
-            "daily_loss": self.stats.daily_loss
+            "daily_loss": self.stats.daily_loss,
+            "daily_exit_completed": self.daily_exit_completed
         }
     
     def update_risk_limits(self, **kwargs):
@@ -1155,9 +1658,6 @@ class MultiStrategyIntradayTrader:
         # Initialize strategy performance
         self.strategy_performance = {}
         for strategy in TRADING_STRATEGIES.keys():
-            self.strategy_performance[strategy] = {"signals": 0, "trades": 0, "wins": 0, "pnl": 0.0}
-        
-        for strategy in HIGH_ACCURACY_STRATEGIES.keys():
             self.strategy_performance[strategy] = {"signals": 0, "trades": 0, "wins": 0, "pnl": 0.0}
         
         self.data_manager = EnhancedDataManager()
@@ -1905,16 +2405,49 @@ class SignalGenerator:
         
         return signals
 
-# ===================== PART 9: KITE LIVE CHARTS =====================
+# ===================== UPDATED KITE LIVE CHARTS =====================
 def create_kite_live_charts(kite_manager):
-    """Create Kite Connect Live Charts Tab"""
-    st.subheader("📈 Kite Connect Live Charts")
+    """Create Kite Connect Live Charts Tab with Real-Time Ticks"""
+    st.subheader("📈 Kite Connect Live Charts (Real-Time)")
     
     if not kite_manager.is_authenticated:
         st.info("Please authenticate with Kite Connect in the sidebar to view live charts")
         return
     
     st.success(f"✅ Authenticated as {st.session_state.get('kite_user_name', 'User')}")
+    
+    # Initialize WebSocket ticker
+    if st.session_state.kite_ticker is None:
+        st.session_state.kite_ticker = KiteLiveTicker(kite_manager)
+    
+    ticker = st.session_state.kite_ticker
+    
+    # WebSocket connection controls
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if not ticker.is_connected:
+            if st.button("🔗 Connect Live Feed", type="primary", key="connect_ws_btn"):
+                if ticker.connect():
+                    st.success("Live feed connected!")
+                    st.rerun()
+                else:
+                    st.error("Failed to connect live feed")
+        else:
+            if st.button("🔴 Disconnect Live Feed", type="secondary", key="disconnect_ws_btn"):
+                ticker.disconnect()
+                st.info("Live feed disconnected")
+                st.rerun()
+    
+    with col2:
+        if ticker.is_connected:
+            status_color = "🟢"
+            status_text = "CONNECTED"
+        else:
+            status_color = "🔴"
+            status_text = "DISCONNECTED"
+        
+        st.metric("Live Feed Status", f"{status_color} {status_text}")
     
     # Index mapping
     INDEX_MAP = {
@@ -1924,213 +2457,477 @@ def create_kite_live_charts(kite_manager):
         "SENSEX": {"token": 265, "symbol": "BSE:SENSEX"}
     }
     
-    col1, col2, col3 = st.columns(3)
+    # Stock mapping
+    STOCK_MAP = {
+        "RELIANCE": {"token": 738561, "symbol": "NSE:RELIANCE"},
+        "TCS": {"token": 2953217, "symbol": "NSE:TCS"},
+        "HDFCBANK": {"token": 341249, "symbol": "NSE:HDFCBANK"},
+        "INFY": {"token": 408065, "symbol": "NSE:INFY"},
+        "ICICIBANK": {"token": 1270529, "symbol": "NSE:ICICIBANK"}
+    }
     
-    with col1:
-        selected_index = st.selectbox("Select Index", list(INDEX_MAP.keys()), key="chart_index_select")
+    # Create tabs for different chart types
+    chart_tabs = st.tabs(["📊 Live Index Charts", "📈 Live Stock Charts", "📉 Historical Charts"])
     
-    with col2:
-        interval = st.selectbox("Interval", ["minute", "5minute", "15minute", "30minute", "60minute", "day"], 
-                               key="chart_interval_select")
-    
-    with col3:
-        days_back = st.slider("Days Back", 1, 30, 7, key="chart_days_slider")
-    
-    if st.button("📊 Load Live Chart", type="primary", key="load_chart_btn"):
-        try:
+    # Tab 1: Live Index Charts
+    with chart_tabs[0]:
+        st.subheader("📊 Live Index Charts (Real-Time)")
+        
+        if not ticker.is_connected:
+            st.warning("Connect to live feed to see real-time charts")
+        else:
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                selected_index = st.selectbox("Select Index", list(INDEX_MAP.keys()), key="live_index_select")
+            
+            with col2:
+                interval = st.selectbox("Candle Interval", ["1m", "5m", "15m", "30m", "1h"], key="live_interval_select")
+            
+            with col3:
+                num_candles = st.slider("Number of Candles", 10, 200, 50, key="live_num_candles")
+            
+            # Get index info
             index_info = INDEX_MAP[selected_index]
-            with st.spinner(f"Fetching {selected_index} data..."):
-                # Try to get data from Kite
-                data = kite_manager.get_historical_data(index_info["token"], interval, days_back)
-                
-                if data is not None and len(data) > 0:
-                    # Create candlestick chart
-                    fig = go.Figure(data=[go.Candlestick(
-                        x=data.index,
-                        open=data['open'],
-                        high=data['high'],
-                        low=data['low'],
-                        close=data['close'],
-                        name=selected_index
-                    )])
+            token = index_info["token"]
+            
+            # Subscribe to this token
+            ticker.subscribe([token])
+            
+            # Create placeholder for live updates
+            chart_placeholder = st.empty()
+            stats_placeholder = st.empty()
+            
+            # Auto-refresh for live data
+            if st.button("🔄 Update Live Chart", key="update_live_chart_btn") or ticker.is_connected:
+                try:
+                    # Get candle data
+                    candle_data = ticker.get_candle_data(token, num_candles)
                     
-                    # Add moving averages
-                    data['SMA20'] = data['close'].rolling(window=20).mean()
-                    data['SMA50'] = data['close'].rolling(window=50).mean()
-                    
-                    fig.add_trace(go.Scatter(
-                        x=data.index,
-                        y=data['SMA20'],
-                        mode='lines',
-                        name='SMA 20',
-                        line=dict(color='orange', width=1)
-                    ))
-                    
-                    fig.add_trace(go.Scatter(
-                        x=data.index,
-                        y=data['SMA50'],
-                        mode='lines',
-                        name='SMA 50',
-                        line=dict(color='blue', width=1)
-                    ))
-                    
-                    fig.update_layout(
-                        title=f'{selected_index} Live Chart ({interval})',
-                        xaxis_title='Date',
-                        yaxis_title='Price (₹)',
-                        height=500,
-                        template='plotly_white',
-                        showlegend=True
-                    )
-                    
-                    fig.update_xaxes(
-                        rangeslider_visible=False,
-                        rangeselector=dict(
-                            buttons=list([
-                                dict(count=1, label="1D", step="day", stepmode="backward"),
-                                dict(count=7, label="1W", step="day", stepmode="backward"),
-                                dict(count=1, label="1M", step="month", stepmode="backward"),
-                                dict(count=3, label="3M", step="month", stepmode="backward"),
-                                dict(step="all")
-                            ])
-                        )
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Show current stats
-                    current_price = data['close'].iloc[-1]
-                    prev_close = data['close'].iloc[-2] if len(data) > 1 else current_price
-                    change_pct = ((current_price - prev_close) / prev_close) * 100
-                    
-                    st.metric(f"Current {selected_index}", 
-                             f"₹{current_price:,.2f}", 
-                             f"{change_pct:+.2f}%")
-                    
-                    # Show additional stats
-                    cols = st.columns(4)
-                    cols[0].metric("Open", f"₹{data['open'].iloc[-1]:,.2f}")
-                    cols[1].metric("High", f"₹{data['high'].max():,.2f}")
-                    cols[2].metric("Low", f"₹{data['low'].min():,.2f}")
-                    cols[3].metric("Volume", f"{data['volume'].sum():,}")
-                    
-                    # Download button
-                    csv = data.to_csv()
-                    st.download_button(
-                        label="📥 Download CSV",
-                        data=csv,
-                        file_name=f"{selected_index}_{interval}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv",
-                        key="download_chart_data"
-                    )
-                    
-                else:
-                    # Fallback to yfinance if Kite data not available
-                    st.info("Using yfinance data (Kite data unavailable)")
-                    ticker_map = {
-                        "NIFTY 50": "^NSEI",
-                        "BANK NIFTY": "^NSEBANK",
-                        "FIN NIFTY": "^NIFTY_FIN_SERVICE",
-                        "SENSEX": "^BSESN"
-                    }
-                    
-                    yf_ticker = ticker_map.get(selected_index, "^NSEI")
-                    period_map = {
-                        "minute": "1d", "5minute": "5d", "15minute": "7d",
-                        "30minute": "15d", "60minute": "30d", "day": f"{days_back}d"
-                    }
-                    
-                    df = yf.download(yf_ticker, period=period_map.get(interval, "7d"), 
-                                    interval=interval.replace("minute", "m").replace("60minute", "60m"))
-                    
-                    if not df.empty:
+                    if candle_data and len(candle_data['timestamp']) > 0:
+                        # Convert timestamps to datetime
+                        timestamps = [datetime.fromtimestamp(ts) for ts in candle_data['timestamp']]
+                        
+                        # Create candlestick chart
                         fig = go.Figure(data=[go.Candlestick(
-                            x=df.index,
-                            open=df['Open'],
-                            high=df['High'],
-                            low=df['Low'],
-                            close=df['Close']
+                            x=timestamps,
+                            open=candle_data['open'],
+                            high=candle_data['high'],
+                            low=candle_data['low'],
+                            close=candle_data['close'],
+                            name=selected_index,
+                            increasing_line_color='#26a69a',
+                            decreasing_line_color='#ef5350'
                         )])
                         
+                        # Add volume as subplot
+                        fig = make_subplots(
+                            rows=2, cols=1,
+                            shared_xaxes=True,
+                            vertical_spacing=0.03,
+                            row_heights=[0.7, 0.3]
+                        )
+                        
+                        # Candlestick chart
+                        fig.add_trace(go.Candlestick(
+                            x=timestamps,
+                            open=candle_data['open'],
+                            high=candle_data['high'],
+                            low=candle_data['low'],
+                            close=candle_data['close'],
+                            name=selected_index,
+                            increasing_line_color='#26a69a',
+                            decreasing_line_color='#ef5350'
+                        ), row=1, col=1)
+                        
+                        # Volume chart
+                        fig.add_trace(go.Bar(
+                            x=timestamps,
+                            y=candle_data['volume'],
+                            name='Volume',
+                            marker_color='#ff8c00',
+                            opacity=0.7
+                        ), row=2, col=1)
+                        
+                        # Add moving averages
+                        if len(candle_data['close']) >= 20:
+                            close_prices = np.array(candle_data['close'])
+                            sma20 = talib.SMA(close_prices, timeperiod=20) if TALIB_AVAILABLE else pd.Series(close_prices).rolling(20).mean()
+                            sma50 = talib.SMA(close_prices, timeperiod=50) if TALIB_AVAILABLE else pd.Series(close_prices).rolling(50).mean()
+                            
+                            fig.add_trace(go.Scatter(
+                                x=timestamps,
+                                y=sma20,
+                                mode='lines',
+                                name='SMA 20',
+                                line=dict(color='orange', width=1)
+                            ), row=1, col=1)
+                            
+                            fig.add_trace(go.Scatter(
+                                x=timestamps,
+                                y=sma50,
+                                mode='lines',
+                                name='SMA 50',
+                                line=dict(color='blue', width=1)
+                            ), row=1, col=1)
+                        
+                        # Update layout
                         fig.update_layout(
-                            title=f'{selected_index} Chart ({interval}) - via Yahoo Finance',
-                            height=500
+                            title=f'{selected_index} Live Chart ({interval}) - Real-Time',
+                            xaxis_title='Time',
+                            yaxis_title='Price (₹)',
+                            height=600,
+                            template='plotly_white',
+                            showlegend=True,
+                            xaxis_rangeslider_visible=False
+                        )
+                        
+                        # Update axes
+                        fig.update_xaxes(title_text="Time", row=2, col=1)
+                        fig.update_yaxes(title_text="Price (₹)", row=1, col=1)
+                        fig.update_yaxes(title_text="Volume", row=2, col=1)
+                        
+                        # Display chart
+                        chart_placeholder.plotly_chart(fig, use_container_width=True)
+                        
+                        # Get latest tick
+                        latest_tick = ticker.get_latest_tick(token)
+                        
+                        if latest_tick:
+                            # Display live stats
+                            current_price = latest_tick.get('last_price', 0)
+                            open_price = latest_tick.get('ohlc', {}).get('open', 0)
+                            high_price = latest_tick.get('ohlc', {}).get('high', 0)
+                            low_price = latest_tick.get('ohlc', {}).get('low', 0)
+                            change = current_price - open_price
+                            change_pct = (change / open_price * 100) if open_price > 0 else 0
+                            
+                            stats_cols = st.columns(6)
+                            stats_cols[0].metric("Current", f"₹{current_price:,.2f}", 
+                                               f"{change:+.2f} ({change_pct:+.2f}%)",
+                                               delta_color="normal" if change >= 0 else "inverse")
+                            stats_cols[1].metric("Open", f"₹{open_price:,.2f}")
+                            stats_cols[2].metric("High", f"₹{high_price:,.2f}")
+                            stats_cols[3].metric("Low", f"₹{low_price:,.2f}")
+                            stats_cols[4].metric("Volume", f"{latest_tick.get('volume_traded', 0):,}")
+                            stats_cols[5].metric("Last Update", 
+                                               datetime.fromtimestamp(ticker.get_last_update_time(token)).strftime("%H:%M:%S") 
+                                               if ticker.get_last_update_time(token) > 0 else "N/A")
+                            
+                            # Order book simulation
+                            with st.expander("📊 Order Book (Simulated)", expanded=False):
+                                ob_cols = st.columns(2)
+                                
+                                with ob_cols[0]:
+                                    st.markdown("**Bid Side**")
+                                    for i in range(5, 0, -1):
+                                        bid_price = current_price - (i * 0.05 * current_price / 100)
+                                        bid_qty = random.randint(100, 1000)
+                                        st.markdown(f"₹{bid_price:.2f} | {bid_qty:>6}")
+                                
+                                with ob_cols[1]:
+                                    st.markdown("**Ask Side**")
+                                    for i in range(1, 6):
+                                        ask_price = current_price + (i * 0.05 * current_price / 100)
+                                        ask_qty = random.randint(100, 1000)
+                                        st.markdown(f"₹{ask_price:.2f} | {ask_qty:>6}")
+                        
+                        # Auto-refresh toggle
+                        auto_refresh = st.checkbox("🔄 Auto-Refresh (5s)", value=True, key="auto_refresh_live")
+                        
+                        if auto_refresh:
+                            time.sleep(5)
+                            st.rerun()
+                    
+                    else:
+                        st.info("Waiting for live data...")
+                        time.sleep(2)
+                        st.rerun()
+                        
+                except Exception as e:
+                    st.error(f"Error updating live chart: {str(e)}")
+    
+    # Tab 2: Live Stock Charts
+    with chart_tabs[1]:
+        st.subheader("📈 Live Stock Charts (Real-Time)")
+        
+        if not ticker.is_connected:
+            st.warning("Connect to live feed to see real-time stock charts")
+        else:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                selected_stock = st.selectbox("Select Stock", list(STOCK_MAP.keys()), key="live_stock_select")
+            
+            with col2:
+                stock_interval = st.selectbox("Chart Interval", ["1m", "5m", "15m"], key="live_stock_interval")
+            
+            # Get stock info
+            stock_info = STOCK_MAP[selected_stock]
+            token = stock_info["token"]
+            
+            # Subscribe to this stock
+            ticker.subscribe([token])
+            
+            # Create placeholder
+            stock_chart_placeholder = st.empty()
+            stock_stats_placeholder = st.empty()
+            
+            if st.button("📊 Load Live Stock Chart", key="load_live_stock_btn"):
+                try:
+                    # Get candle data
+                    candle_data = ticker.get_candle_data(token, 50)
+                    
+                    if candle_data and len(candle_data['timestamp']) > 0:
+                        # Convert timestamps
+                        timestamps = [datetime.fromtimestamp(ts) for ts in candle_data['timestamp']]
+                        
+                        # Create chart
+                        fig = go.Figure(data=[go.Candlestick(
+                            x=timestamps,
+                            open=candle_data['open'],
+                            high=candle_data['high'],
+                            low=candle_data['low'],
+                            close=candle_data['close'],
+                            name=selected_stock,
+                            increasing_line_color='#26a69a',
+                            decreasing_line_color='#ef5350'
+                        )])
+                        
+                        # Add indicators
+                        if len(candle_data['close']) >= 20:
+                            close_prices = np.array(candle_data['close'])
+                            
+                            # EMA
+                            ema9 = talib.EMA(close_prices, timeperiod=9) if TALIB_AVAILABLE else pd.Series(close_prices).ewm(span=9).mean()
+                            ema21 = talib.EMA(close_prices, timeperiod=21) if TALIB_AVAILABLE else pd.Series(close_prices).ewm(span=21).mean()
+                            
+                            fig.add_trace(go.Scatter(
+                                x=timestamps,
+                                y=ema9,
+                                mode='lines',
+                                name='EMA 9',
+                                line=dict(color='orange', width=1)
+                            ))
+                            
+                            fig.add_trace(go.Scatter(
+                                x=timestamps,
+                                y=ema21,
+                                mode='lines',
+                                name='EMA 21',
+                                line=dict(color='blue', width=1)
+                            ))
+                        
+                        fig.update_layout(
+                            title=f'{selected_stock} Live Chart ({stock_interval})',
+                            height=400,
+                            xaxis_rangeslider_visible=False
+                        )
+                        
+                        stock_chart_placeholder.plotly_chart(fig, use_container_width=True)
+                        
+                        # Get latest tick
+                        latest_tick = ticker.get_latest_tick(token)
+                        
+                        if latest_tick:
+                            current_price = latest_tick.get('last_price', 0)
+                            prev_close = latest_tick.get('ohlc', {}).get('open', current_price)
+                            change = current_price - prev_close
+                            change_pct = (change / prev_close * 100) if prev_close > 0 else 0
+                            
+                            # Display stats
+                            stats_cols = st.columns(4)
+                            stats_cols[0].metric("Price", f"₹{current_price:.2f}", 
+                                               f"{change:+.2f} ({change_pct:+.2f}%)")
+                            stats_cols[1].metric("Volume", f"{latest_tick.get('volume_traded', 0):,}")
+                            stats_cols[2].metric("Bid Qty", f"{latest_tick.get('depth', {}).get('buy', [{}])[0].get('quantity', 0):,}")
+                            stats_cols[3].metric("Ask Qty", f"{latest_tick.get('depth', {}).get('sell', [{}])[0].get('quantity', 0):,}")
+                    
+                except Exception as e:
+                    st.error(f"Error loading stock chart: {str(e)}")
+    
+    # Tab 3: Historical Charts (Original functionality)
+    with chart_tabs[2]:
+        st.subheader("📉 Historical Charts")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            selected_index = st.selectbox("Select Index", list(INDEX_MAP.keys()), key="hist_index_select")
+        
+        with col2:
+            interval = st.selectbox("Interval", ["minute", "5minute", "15minute", "30minute", "60minute", "day"], 
+                                   key="hist_interval_select")
+        
+        with col3:
+            days_back = st.slider("Days Back", 1, 30, 7, key="hist_days_slider")
+        
+        if st.button("📊 Load Historical Chart", type="primary", key="load_hist_chart_btn"):
+            try:
+                index_info = INDEX_MAP[selected_index]
+                with st.spinner(f"Fetching {selected_index} data..."):
+                    # Try to get data from Kite
+                    data = kite_manager.get_historical_data(index_info["token"], interval, days_back)
+                    
+                    if data is not None and len(data) > 0:
+                        # Create candlestick chart
+                        fig = go.Figure(data=[go.Candlestick(
+                            x=data.index,
+                            open=data['open'],
+                            high=data['high'],
+                            low=data['low'],
+                            close=data['close'],
+                            name=selected_index
+                        )])
+                        
+                        # Add moving averages
+                        data['SMA20'] = data['close'].rolling(window=20).mean()
+                        data['SMA50'] = data['close'].rolling(window=50).mean()
+                        
+                        fig.add_trace(go.Scatter(
+                            x=data.index,
+                            y=data['SMA20'],
+                            mode='lines',
+                            name='SMA 20',
+                            line=dict(color='orange', width=1)
+                        ))
+                        
+                        fig.add_trace(go.Scatter(
+                            x=data.index,
+                            y=data['SMA50'],
+                            mode='lines',
+                            name='SMA 50',
+                            line=dict(color='blue', width=1)
+                        ))
+                        
+                        fig.update_layout(
+                            title=f'{selected_index} Historical Chart ({interval})',
+                            xaxis_title='Date',
+                            yaxis_title='Price (₹)',
+                            height=500,
+                            template='plotly_white',
+                            showlegend=True
+                        )
+                        
+                        fig.update_xaxes(
+                            rangeslider_visible=False,
+                            rangeselector=dict(
+                                buttons=list([
+                                    dict(count=1, label="1D", step="day", stepmode="backward"),
+                                    dict(count=7, label="1W", step="day", stepmode="backward"),
+                                    dict(count=1, label="1M", step="month", stepmode="backward"),
+                                    dict(count=3, label="3M", step="month", stepmode="backward"),
+                                    dict(step="all")
+                                ])
+                            )
                         )
                         
                         st.plotly_chart(fig, use_container_width=True)
                         
-                        current_price = df['Close'].iloc[-1]
-                        prev_close = df['Close'].iloc[-2] if len(df) > 1 else current_price
-                        change_pct = ((current_price - prev_close) / prev_close) * 100
+                        # Show current stats
+                        if len(data) > 0:
+                            current_price = data['close'].iloc[-1]
+                            prev_close = data['close'].iloc[-2] if len(data) > 1 else current_price
+                            change_pct = ((current_price - prev_close) / prev_close) * 100
+                            
+                            st.metric(f"Current {selected_index}", 
+                                     f"₹{current_price:,.2f}", 
+                                     f"{change_pct:+.2f}%")
+                            
+                            # Show additional stats
+                            cols = st.columns(4)
+                            cols[0].metric("Open", f"₹{data['open'].iloc[-1]:,.2f}")
+                            cols[1].metric("High", f"₹{data['high'].max():,.2f}")
+                            cols[2].metric("Low", f"₹{data['low'].min():,.2f}")
+                            cols[3].metric("Volume", f"{data['volume'].sum():,}")
+                            
+                            # Download button
+                            csv = data.to_csv()
+                            st.download_button(
+                                label="📥 Download CSV",
+                                data=csv,
+                                file_name=f"{selected_index}_{interval}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                mime="text/csv",
+                                key="download_hist_data"
+                            )
                         
-                        st.metric(f"Current {selected_index}", f"₹{current_price:,.2f}", f"{change_pct:+.2f}%")
-                    
-        except Exception as e:
-            st.error(f"Error loading chart: {str(e)}")
+                    else:
+                        # Fallback to yfinance
+                        st.info("Using yfinance data (Kite data unavailable)")
+                        ticker_map = {
+                            "NIFTY 50": "^NSEI",
+                            "BANK NIFTY": "^NSEBANK",
+                            "FIN NIFTY": "^NIFTY_FIN_SERVICE",
+                            "SENSEX": "^BSESN"
+                        }
+                        
+                        yf_ticker = ticker_map.get(selected_index, "^NSEI")
+                        period_map = {
+                            "minute": "1d", "5minute": "5d", "15minute": "7d",
+                            "30minute": "15d", "60minute": "30d", "day": f"{days_back}d"
+                        }
+                        
+                        df = yf.download(yf_ticker, period=period_map.get(interval, "7d"), 
+                                        interval=interval.replace("minute", "m").replace("60minute", "60m"))
+                        
+                        if not df.empty:
+                            fig = go.Figure(data=[go.Candlestick(
+                                x=df.index,
+                                open=df['Open'],
+                                high=df['High'],
+                                low=df['Low'],
+                                close=df['Close']
+                            )])
+                            
+                            fig.update_layout(
+                                title=f'{selected_index} Chart ({interval}) - via Yahoo Finance',
+                                height=500
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            current_price = df['Close'].iloc[-1]
+                            prev_close = df['Close'].iloc[-2] if len(df) > 1 else current_price
+                            change_pct = ((current_price - prev_close) / prev_close) * 100
+                            
+                            st.metric(f"Current {selected_index}", f"₹{current_price:,.2f}", f"{change_pct:+.2f}%")
+                
+            except Exception as e:
+                st.error(f"Error loading chart: {str(e)}")
     
-    # Stock selector for individual stocks
-    st.subheader("📊 Individual Stock Charts")
+    # Market Depth and Advanced Features
+    st.markdown("---")
+    st.subheader("🎯 Advanced Features")
     
-    stock_col1, stock_col2 = st.columns(2)
+    adv_cols = st.columns(3)
     
-    with stock_col1:
-        selected_stock = st.selectbox("Select Stock", NIFTY_50[:20], key="stock_chart_select")
+    with adv_cols[0]:
+        if st.button("📊 Market Watch", key="market_watch_btn"):
+            st.info("Market watch feature would show multiple instruments simultaneously")
     
-    with stock_col2:
-        stock_interval = st.selectbox("Chart Interval", ["15m", "30m", "1h", "1d"], key="stock_interval_select")
+    with adv_cols[1]:
+        if st.button("🔔 Price Alerts", key="price_alerts_btn"):
+            st.info("Price alert system for notifications")
     
-    if st.button("📈 Load Stock Chart", key="load_stock_chart_btn"):
-        try:
-            data_manager = EnhancedDataManager()
-            data = data_manager.get_stock_data(selected_stock, stock_interval)
-            
-            if data is not None and len(data) > 0:
-                fig = go.Figure(data=[go.Candlestick(
-                    x=data.index,
-                    open=data['Open'],
-                    high=data['High'],
-                    low=data['Low'],
-                    close=data['Close']
-                )])
-                
-                # Add indicators
-                fig.add_trace(go.Scatter(
-                    x=data.index,
-                    y=data['EMA8'],
-                    mode='lines',
-                    name='EMA 8',
-                    line=dict(color='orange', width=1)
-                ))
-                
-                fig.add_trace(go.Scatter(
-                    x=data.index,
-                    y=data['EMA21'],
-                    mode='lines',
-                    name='EMA 21',
-                    line=dict(color='blue', width=1)
-                ))
-                
-                fig.update_layout(
-                    title=f'{selected_stock.replace(".NS", "")} Chart ({stock_interval})',
-                    height=400
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Current stats
-                current_price = data['Close'].iloc[-1]
-                ema8 = data['EMA8'].iloc[-1]
-                ema21 = data['EMA21'].iloc[-1]
-                rsi_val = data['RSI14'].iloc[-1]
-                
-                cols = st.columns(4)
-                cols[0].metric("Price", f"₹{current_price:.2f}")
-                cols[1].metric("EMA 8", f"₹{ema8:.2f}")
-                cols[2].metric("EMA 21", f"₹{ema21:.2f}")
-                cols[3].metric("RSI", f"{rsi_val:.1f}")
-                
-        except Exception as e:
-            st.error(f"Error loading stock chart: {str(e)}")
+    with adv_cols[2]:
+        if st.button("📈 Technical Scanner", key="tech_scanner_btn"):
+            st.info("Technical scanner for pattern recognition")
+    
+    # WebSocket status info
+    if ticker.is_connected:
+        st.markdown("""
+        <div class="alert-success">
+            <strong>✅ Live Feed Active</strong><br>
+            Real-time data streaming from Kite Connect WebSocket
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div class="alert-warning">
+            <strong>⚠️ Live Feed Inactive</strong><br>
+            Click "Connect Live Feed" to enable real-time tick-by-tick data
+        </div>
+        """, unsafe_allow_html=True)
 
 # ===================== PART 10: ALGO TRADING TAB =====================
 def create_algo_trading_tab(algo_engine):
@@ -2214,6 +3011,39 @@ def create_algo_trading_tab(algo_engine):
             algo_engine.emergency_stop("Manual emergency stop")
             st.error("EMERGENCY STOP ACTIVATED")
             st.rerun()
+    
+    # Daily Exit Info
+    st.subheader("🕒 Daily Schedule")
+    
+    schedule_cols = st.columns(4)
+    with schedule_cols[0]:
+        st.metric("Market Open", "9:15 AM")
+    with schedule_cols[1]:
+        st.metric("Peak Hours", "9:30 AM - 2:30 PM")
+    with schedule_cols[2]:
+        st.metric("Market Close", "3:30 PM")
+    with schedule_cols[3]:
+        st.metric("Auto Exit", "3:35 PM")
+    
+    # Manual Daily Exit Button
+    if st.button("📤 Force Daily Exit Now", type="secondary", key="force_daily_exit_btn"):
+        if algo_engine.trader and algo_engine.trader.positions:
+            algo_engine._exit_all_positions()
+            st.success("All positions exited!")
+            st.rerun()
+        else:
+            st.info("No positions to exit")
+    
+    # Send Daily Report Button
+    if st.button("📧 Send Daily Report", type="primary", key="send_daily_report_btn"):
+        if algo_engine.trader:
+            success = send_daily_report_email(algo_engine.trader, algo_engine)
+            if success:
+                st.success("Daily report sent to rant2002@gmail.com")
+            else:
+                st.error("Failed to send daily report")
+        else:
+            st.error("Trader not initialized")
     
     # Risk Settings
     st.subheader("Risk Management Settings")
@@ -2303,19 +3133,23 @@ def create_algo_trading_tab(algo_engine):
     strategy_cols = st.columns(2)
     
     with strategy_cols[0]:
-        st.markdown("**High Accuracy Strategies**")
-        for strategy, config in HIGH_ACCURACY_STRATEGIES.items():
-            enabled = st.checkbox(config["name"], value=True, key=f"ha_{strategy}_checkbox")
-    
-    with strategy_cols[1]:
         st.markdown("**Standard Strategies**")
         for strategy, config in TRADING_STRATEGIES.items():
             enabled = st.checkbox(config["name"], value=True, key=f"std_{strategy}_checkbox")
     
+    with strategy_cols[1]:
+        st.markdown("**Signal Settings**")
+        signal_frequency = st.selectbox("Signal Scan Frequency", 
+                                       ["1 min", "5 min", "15 min", "30 min"],
+                                       key="signal_frequency_select")
+        
+        max_signals_per_scan = st.slider("Max Signals per Scan", 1, 20, 5, 
+                                        key="max_signals_slider")
+    
     # Market Conditions
     st.subheader("Market Conditions")
     
-    market_cols = st.columns(3)
+    market_cols = st.columns(4)
     
     with market_cols[0]:
         market_open_status = "🟢 OPEN" if market_open() else "🔴 CLOSED"
@@ -2326,6 +3160,10 @@ def create_algo_trading_tab(algo_engine):
         st.metric("Peak Hours", peak_hours_status)
     
     with market_cols[2]:
+        daily_exit_status = "🟢 PENDING" if not status.get('daily_exit_completed', False) else "🔴 COMPLETED"
+        st.metric("Daily Exit", daily_exit_status)
+    
+    with market_cols[3]:
         st.metric("Trades Today", f"{status['trades_today']}/{algo_engine.risk_limits.max_trades_per_day}")
     
     # Info Box
@@ -2333,6 +3171,8 @@ def create_algo_trading_tab(algo_engine):
     st.markdown("""
     <div class="alert-warning">
         <strong>⚠️ Important:</strong> Algorithmic trading involves significant risk. 
+        The system will automatically exit all positions at 3:35 PM daily.
+        A detailed report will be sent to rant2002@gmail.com after market close.
         Always test with paper trading first. Set appropriate risk limits. 
         Monitor the system regularly. Past performance does not guarantee future results.
     </div>
@@ -2384,9 +3224,6 @@ def main():
         universe = st.selectbox("Trading Universe", ["Nifty 50", "Nifty 100", "Midcap 150", "All Stocks"], 
                                key="universe_select")
         
-        enable_high_accuracy = st.checkbox("Enable High Accuracy Strategies", value=True, 
-                                          key="high_acc_toggle")
-        
         trader.auto_execution = st.checkbox("Auto Execution", value=False, key="auto_exec_toggle")
         
         st.subheader("🎯 Risk Management")
@@ -2409,10 +3246,23 @@ def main():
         st.write(f"✅ Database: {'Available' if SQLALCHEMY_AVAILABLE else 'Not Available'}")
         st.write(f"✅ ML Support: {'Available' if JOBLIB_AVAILABLE else 'Not Available'}")
         st.write(f"✅ TA-Lib: {'Available' if TALIB_AVAILABLE else 'Not Available'}")
+        st.write(f"✅ WebSocket: {'Available' if WEBSOCKET_AVAILABLE else 'Not Available'}")
         st.write(f"✅ Algo Engine: {'Ready' if algo_engine else 'Not Initialized'}")
         st.write(f"🔄 Refresh Count: {st.session_state.refresh_count}")
         st.write(f"📊 Market: {'Open' if market_open() else 'Closed'}")
         st.write(f"⏰ Peak Hours: {'Active' if is_peak_market_hours() else 'Inactive'}")
+        st.write(f"🕒 Auto Exit: {'3:35 PM Daily'}")
+        
+        # Manual daily report button in sidebar
+        if st.button("📧 Send Test Report", key="sidebar_test_report_btn"):
+            if algo_engine.trader:
+                success = send_daily_report_email(algo_engine.trader, algo_engine)
+                if success:
+                    st.success("Test report sent!")
+                else:
+                    st.error("Failed to send test report")
+            else:
+                st.error("Trader not initialized")
     
     # Market Overview
     st.subheader("📊 Market Overview")
@@ -2512,9 +3362,9 @@ def main():
         if st.button("📊 Update Prices", key="update_prices_main_btn"):
             st.rerun()
     
-    # Main Tabs - INCLUDING KITE CHARTS AND ALGO TRADING
+    # Main Tabs - REMOVED HIGH ACCURACY TAB
     tabs = st.tabs(["📈 Dashboard", "🚦 Signals", "💰 Paper Trading", "📋 Trade History", 
-                   "📉 RSI Scanner", "🎯 High Accuracy", "📊 Kite Charts", "🤖 Algo Trading"])
+                   "📉 RSI Scanner", "📊 Kite Charts", "🤖 Algo Trading"])
     
     # Tab 1: Dashboard
     with tabs[0]:
@@ -2535,7 +3385,7 @@ def main():
         # Strategy Performance
         st.subheader("Strategy Performance")
         strategy_data = []
-        for strategy, config in {**TRADING_STRATEGIES, **HIGH_ACCURACY_STRATEGIES}.items():
+        for strategy, config in TRADING_STRATEGIES.items():
             if strategy in trader.strategy_performance:
                 perf_data = trader.strategy_performance[strategy]
                 if perf_data["trades"] > 0:
@@ -2562,7 +3412,7 @@ def main():
         else:
             st.info("No open positions")
     
-    # Tab 2: Signals - UPDATED WITH SIGNAL GENERATOR
+    # Tab 2: Signals
     with tabs[1]:
         st.subheader("📊 Multi-Strategy Signal Scanner")
         
@@ -3016,28 +3866,12 @@ def main():
                 else:
                     st.info("No extreme RSI stocks found")
     
-    # Tab 6: High Accuracy Scanner
+    # Tab 6: Kite Charts - UPDATED WITH WEB SOCKET
     with tabs[5]:
-        st.subheader("🎯 High Accuracy Scanner")
-        st.markdown(f"""
-        <div class="alert-success">
-            <strong>🔥 High Accuracy Strategies Enabled</strong><br>
-            Scanning with enhanced multi-confirmation strategies
-        </div>
-        """, unsafe_allow_html=True)
-        
-        if st.button("🚀 Run High Accuracy Scan", type="primary", key="high_acc_scan"):
-            with st.spinner(f"Running high accuracy scan on {universe}..."):
-                time.sleep(2)
-                st.success("High accuracy scan completed!")
-                st.info("High accuracy signal generation logic would be implemented here")
-    
-    # Tab 7: Kite Charts - NEW TAB
-    with tabs[6]:
         create_kite_live_charts(kite_manager)
     
-    # Tab 8: Algo Trading - NEW TAB
-    with tabs[7]:
+    # Tab 7: Algo Trading - UPDATED WITH DAILY EXIT
+    with tabs[6]:
         create_algo_trading_tab(algo_engine)
     
     # Footer
@@ -3045,7 +3879,8 @@ def main():
     st.markdown(f"""
     <div style="text-align: center; color: #6b7280; font-size: 12px;">
         <strong>Rantv Terminal Pro</strong> | Complete Trading Suite with Algo Engine & Live Charts | © 2024 | 
-        Refresh: {st.session_state.refresh_count} | {now_indian().strftime("%H:%M:%S")}
+        Refresh: {st.session_state.refresh_count} | {now_indian().strftime("%H:%M:%S")} | 
+        Auto Exit: 3:35 PM | Daily Report: rant2002@gmail.com
     </div>
     """, unsafe_allow_html=True)
 
