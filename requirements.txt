@@ -39,7 +39,7 @@ SQLAlchemy
 streamlit
 streamlit-autorefresh
 urllib3
-websocket-client
+websocket-client==1.6.3
 yfinance
 # requirements.txt
 dash>=2.0.0
@@ -50,4 +50,6 @@ numpy>=1.21.0
 kiteconnect>=4.0.0
 pyperclip>=1.8.0
 requests>=2.26.0
+python-dotenv==1.0.0
+cachetools==5.3.1
 
