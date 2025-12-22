@@ -794,6 +794,7 @@ def send_daily_report_email(trader, algo_engine):
         return False
 
 # ===================== KITE LIVE TICKER =====================
+# ===================== KITE LIVE TICKER =====================
 class KiteLiveTicker:
     """Live WebSocket ticker for Kite Connect"""
     
@@ -804,21 +805,24 @@ class KiteLiveTicker:
         self.subscribed_tokens = set()
         self.is_connected = False
         self.last_update = {}
-        self.candle_data = {}  # Store candle data for each token
+        self.candle_data = {}
         self.thread = None
+        self.running = False
         
     def connect(self):
         """Connect to Kite WebSocket"""
         if not self.kite_manager.is_authenticated or not self.kite_manager.access_token:
+            st.error("Kite not authenticated")
             return False
             
         try:
             access_token = self.kite_manager.access_token
             api_key = self.kite_manager.api_key
             
-            # WebSocket URL
+            # Correct WebSocket URL format for Kite Connect
             ws_url = f"wss://ws.kite.trade?api_key={api_key}&access_token={access_token}"
             
+            # Initialize WebSocket
             self.ws = websocket.WebSocketApp(
                 ws_url,
                 on_open=self._on_open,
@@ -828,122 +832,177 @@ class KiteLiveTicker:
             )
             
             # Start WebSocket in a separate thread
-            self.thread = threading.Thread(target=self.ws.run_forever)
+            self.running = True
+            self.thread = threading.Thread(target=self._run_websocket)
             self.thread.daemon = True
             self.thread.start()
             
-            self.is_connected = True
-            logger.info("Kite WebSocket connected")
-            return True
+            # Wait for connection
+            for _ in range(10):  # Wait up to 2 seconds
+                if self.is_connected:
+                    logger.info("Kite WebSocket connected successfully")
+                    return True
+                time.sleep(0.2)
+            
+            logger.warning("WebSocket connection timeout")
+            return False
             
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
+            st.error(f"Connection error: {str(e)}")
             return False
+    
+    def _run_websocket(self):
+        """Run WebSocket connection"""
+        try:
+            self.ws.run_forever(
+                ping_interval=30,
+                ping_timeout=10,
+                reconnect=5
+            )
+        except Exception as e:
+            logger.error(f"WebSocket run error: {e}")
+        finally:
+            self.is_connected = False
+            self.running = False
     
     def disconnect(self):
         """Disconnect WebSocket"""
+        self.running = False
         if self.ws:
-            self.ws.close()
+            try:
+                self.ws.close()
+            except:
+                pass
         self.is_connected = False
         self.subscribed_tokens.clear()
         logger.info("Kite WebSocket disconnected")
     
     def _on_open(self, ws):
-        logger.info("WebSocket connection opened")
+        logger.info("✅ WebSocket connection opened")
+        self.is_connected = True
+        
         # Subscribe to default indices
-        self.subscribe([256265, 260105])  # NIFTY 50, BANKNIFTY
+        default_tokens = [256265, 260105]  # NIFTY 50, BANKNIFTY
+        self.subscribe(default_tokens)
+        
+        # Start a heartbeat thread
+        threading.Thread(target=self._heartbeat, daemon=True).start()
     
     def _on_message(self, ws, message):
         try:
             data = json.loads(message)
             
-            if isinstance(data, dict) and 'type' in data:
-                if data['type'] == 'ticks':
-                    self._process_ticks(data)
-                elif data['type'] == 'order_update':
-                    logger.info(f"Order update: {data}")
+            # Handle different message types
+            if isinstance(data, list):
+                # Tick data
+                for tick in data:
+                    self._process_tick(tick)
+            elif isinstance(data, dict):
+                if 'type' in data:
+                    if data['type'] == 'order_update':
+                        logger.info(f"Order update: {data}")
+                    elif data['type'] == 'ticks':
+                        self._process_ticks(data)
+                elif 't' in data:  # Alternative tick format
+                    self._process_tick(data)
             
         except Exception as e:
             logger.error(f"WebSocket message error: {e}")
     
-    def _process_ticks(self, data):
-        """Process tick data"""
-        ticks = data.get('ticks', [])
-        
-        for tick in ticks:
+    def _process_tick(self, tick):
+        """Process individual tick"""
+        try:
             token = tick.get('instrument_token')
             if not token:
-                continue
-                
+                return
+            
             # Store tick data
             self.tick_data[token] = tick
             self.last_update[token] = time.time()
             
             # Update candle data
             self._update_candle_data(token, tick)
+            
+        except Exception as e:
+            logger.error(f"Tick processing error: {e}")
+    
+    def _process_ticks(self, data):
+        """Process batch ticks"""
+        ticks = data.get('ticks', [])
+        for tick in ticks:
+            self._process_tick(tick)
     
     def _update_candle_data(self, token, tick):
         """Update candle data from ticks"""
-        if token not in self.candle_data:
-            self.candle_data[token] = {
-                'open': [],
-                'high': [],
-                'low': [],
-                'close': [],
-                'volume': [],
-                'timestamp': []
-            }
-        
-        current_time = time.time()
-        candle_interval = 60  # 1-minute candles
-        
-        # Get or create current candle
-        if not self.candle_data[token]['timestamp']:
-            # First candle
-            candle_start = current_time - (current_time % candle_interval)
-        else:
-            candle_start = self.candle_data[token]['timestamp'][-1]
-        
-        if current_time - candle_start >= candle_interval:
-            # Create new candle
-            new_candle_start = current_time - (current_time % candle_interval)
-            self.candle_data[token]['timestamp'].append(new_candle_start)
-            self.candle_data[token]['open'].append(tick.get('last_price', 0))
-            self.candle_data[token]['high'].append(tick.get('last_price', 0))
-            self.candle_data[token]['low'].append(tick.get('last_price', 0))
-            self.candle_data[token]['close'].append(tick.get('last_price', 0))
-            self.candle_data[token]['volume'].append(tick.get('volume_traded', 0))
-        else:
-            # Update current candle
-            if self.candle_data[token]['high']:
+        try:
+            if token not in self.candle_data:
+                self.candle_data[token] = {
+                    'open': [],
+                    'high': [],
+                    'low': [],
+                    'close': [],
+                    'volume': [],
+                    'timestamp': []
+                }
+            
+            current_time = time.time()
+            last_price = tick.get('last_price', 0)
+            volume = tick.get('volume_traded', 0)
+            
+            # Create 1-minute candles
+            candle_interval = 60
+            candle_time = int(current_time / candle_interval) * candle_interval
+            
+            if not self.candle_data[token]['timestamp'] or self.candle_data[token]['timestamp'][-1] != candle_time:
+                # New candle
+                self.candle_data[token]['timestamp'].append(candle_time)
+                self.candle_data[token]['open'].append(last_price)
+                self.candle_data[token]['high'].append(last_price)
+                self.candle_data[token]['low'].append(last_price)
+                self.candle_data[token]['close'].append(last_price)
+                self.candle_data[token]['volume'].append(volume)
+            else:
+                # Update current candle
                 idx = -1
-                current_price = tick.get('last_price', 0)
-                
-                # Update high
-                if current_price > self.candle_data[token]['high'][idx]:
-                    self.candle_data[token]['high'][idx] = current_price
-                
-                # Update low
-                if current_price < self.candle_data[token]['low'][idx]:
-                    self.candle_data[token]['low'][idx] = current_price
-                
-                # Update close
-                self.candle_data[token]['close'][idx] = current_price
-                
-                # Update volume
-                self.candle_data[token]['volume'][idx] = tick.get('volume_traded', 0)
+                self.candle_data[token]['close'][idx] = last_price
+                self.candle_data[token]['high'][idx] = max(self.candle_data[token]['high'][idx], last_price)
+                self.candle_data[token]['low'][idx] = min(self.candle_data[token]['low'][idx], last_price)
+                self.candle_data[token]['volume'][idx] = volume
+            
+            # Keep only last 100 candles
+            max_candles = 100
+            for key in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
+                if len(self.candle_data[token][key]) > max_candles:
+                    self.candle_data[token][key] = self.candle_data[token][key][-max_candles:]
+                    
+        except Exception as e:
+            logger.error(f"Candle update error: {e}")
     
     def _on_error(self, ws, error):
         logger.error(f"WebSocket error: {error}")
+        self.is_connected = False
     
     def _on_close(self, ws, close_status_code, close_msg):
         logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
         self.is_connected = False
         self.subscribed_tokens.clear()
     
+    def _heartbeat(self):
+        """Send periodic heartbeat to keep connection alive"""
+        while self.running and self.is_connected:
+            try:
+                time.sleep(25)  # Send ping every 25 seconds
+                if self.ws and self.is_connected:
+                    # Kite WebSocket uses ping frames automatically
+                    pass
+            except:
+                break
+    
     def subscribe(self, tokens):
         """Subscribe to instruments"""
         if not self.is_connected or not self.ws:
+            logger.warning("WebSocket not connected for subscription")
             return False
             
         try:
@@ -958,7 +1017,7 @@ class KiteLiveTicker:
             }
             
             self.ws.send(json.dumps(subscribe_msg))
-            logger.info(f"Subscribed to tokens: {tokens}")
+            logger.info(f"✅ Subscribed to tokens: {tokens}")
             return True
             
         except Exception as e:
@@ -993,7 +1052,7 @@ class KiteLiveTicker:
         """Get latest tick for a token"""
         return self.tick_data.get(token)
     
-    def get_candle_data(self, token, num_candles=100):
+    def get_candle_data(self, token, num_candles=50):
         """Get candle data for a token"""
         if token not in self.candle_data:
             return None
@@ -2406,6 +2465,65 @@ class SignalGenerator:
         return signals
 
 # ===================== UPDATED KITE LIVE CHARTS =====================
+def get_instrument_token_from_symbol(symbol):
+    """Map symbol to instrument token (hardcoded for common instruments)"""
+    token_map = {
+        "NIFTY 50": 256265,
+        "BANK NIFTY": 260105,
+        "FIN NIFTY": 257801,
+        "SENSEX": 265,
+        "RELIANCE": 738561,
+        "TCS": 2953217,
+        "HDFCBANK": 341249,
+        "INFY": 408065,
+        "ICICIBANK": 1270529,
+        "ITC": 424961,
+        "SBIN": 779521,
+        "HINDUNILVR": 356865,
+        "KOTAKBANK": 492033,
+        "AXISBANK": 1510401,
+        "LT": 2939649,
+        "BAJFINANCE": 81153,
+        "BHARTIARTL": 2714625,
+        "MARUTI": 2815745,
+        "ASIANPAINT": 60417,
+        "TITAN": 897537,
+        "WIPRO": 969473,
+        "ULTRACEMCO": 2952193,
+        "SUNPHARMA": 857857,
+        "ONGC": 633601,
+        "POWERGRID": 3834113,
+        "NTPC": 2977281,
+        "HCLTECH": 1850625,
+        "TECHM": 3465729,
+        "JSWSTEEL": 3001089,
+        "TATASTEEL": 895745,
+        "GRASIM": 315393,
+        "ADANIPORTS": 3861249,
+        "HINDALCO": 348929,
+        "DRREDDY": 225537,
+        "BRITANNIA": 140033,
+        "DIVISLAB": 2800641,
+        "EICHERMOT": 232961,
+        "BAJAJFINSV": 4267265,
+        "SHREECEM": 794369,
+        "HDFCLIFE": 119553,
+        "SBILIFE": 5582849,
+        "INDUSINDBK": 134657,
+        "HEROMOTOCO": 345089,
+        "NESTLEIND": 4598529,
+        "BPCL": 1346049,
+        "M&M": 519937,
+        "TATAMOTORS": 884737,
+        "COALINDIA": 5215745,
+        "UPL": 2889473,
+        "BAJAJ-AUTO": 4268801,
+        "TATACONSUM": 878593,
+    }
+    
+    # Clean symbol
+    clean_symbol = symbol.replace(".NS", "").replace("NSE:", "").upper()
+    return token_map.get(clean_symbol, None)
 def create_kite_live_charts(kite_manager):
     """Create Kite Connect Live Charts Tab with Real-Time Ticks"""
     st.subheader("📈 Kite Connect Live Charts (Real-Time)")
