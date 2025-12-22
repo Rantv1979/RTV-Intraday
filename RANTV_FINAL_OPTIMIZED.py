@@ -932,15 +932,9 @@ class DataManager:
             return cached_data
     
     try:
-        # Try Kite Connect first if available and authenticated
+        # Try Kite Connect first if available
         if use_kite and self.kite_manager and self.kite_manager.is_authenticated:
-            # Get token for the symbol
-            token = None
-            for key, value in TradingConstants.KITE_TOKEN_MAP.items():
-                if key in symbol or symbol.replace('.NS', '') in key:
-                    token = value
-                    break
-            
+            token = TradingConstants.KITE_TOKEN_MAP.get(symbol)
             if token:
                 # Map interval to Kite interval
                 kite_interval_map = {
