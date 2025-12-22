@@ -22,6 +22,7 @@ import webbrowser
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import subprocess
+import plotly.graph_objects as go
 
 # Try to import optional packages with error handling
 def install_package(package_name):
@@ -2963,22 +2964,12 @@ def render_kite_charts_tab():
     
     st.success(f"✅ Authenticated as {st.session_state.kite_manager.user_name}")
     
-    # Advanced chart options
-    with st.expander("Advanced Chart Settings"):
-        col1, col2 = st.columns(2)
-        with col1:
-            show_smc = st.checkbox("Show SMC Levels", value=True)
-            show_volume = st.checkbox("Show Volume Profile", value=True)
-        with col2:
-            show_indicators = st.checkbox("Show Indicators", value=True)
-            chart_theme = st.selectbox("Chart Theme", ["Dark", "Light"])
-    
-    # Chart selection
+    # Simple chart selection first
     col1, col2, col3 = st.columns(3)
     with col1:
         chart_type = st.selectbox(
             "Chart Type",
-            ["Live Index", "Stock Charts", "Historical Data", "SMC Analysis"],
+            ["Live Index", "Stock Charts", "SMC Analysis"],
             key="kite_chart_type"
         )
     
@@ -2989,202 +2980,81 @@ def render_kite_charts_tab():
                 ["NIFTY 50", "BANK NIFTY"],
                 key="kite_index_select"
             )
+            symbol = index
         elif chart_type == "Stock Charts":
-            stock = st.selectbox(
+            symbol = st.selectbox(
                 "Select Stock",
                 TradingConstants.NIFTY_50[:10],
                 key="kite_stock_select"
             )
-        elif chart_type == "SMC Analysis":
-            stock = st.selectbox(
+        else:  # SMC Analysis
+            symbol = st.selectbox(
                 "Select Stock for SMC",
                 TradingConstants.NIFTY_50[:5],
                 key="kite_smc_select"
-            )
-        else:
-            symbol = st.selectbox(
-                "Select Symbol",
-                TradingConstants.NIFTY_50[:10],
-                key="kite_hist_select"
             )
     
     with col3:
         interval = st.selectbox(
             "Interval",
-            ["1m", "5m", "15m", "30m", "1h"],
+            ["15m", "30m", "1h", "1d"],
             key="kite_interval"
         )
     
     if st.button("📊 Load Chart", type="primary"):
         with st.spinner("Fetching data..."):
             try:
-                if chart_type == "SMC Analysis":
-                    # Get MTF data for SMC analysis
-                    mtf_data = st.session_state.data_manager.get_mtf_data(stock, intervals=["15m", "1h", "1d"])
+                # Get data from DataManager
+                data_manager = st.session_state.data_manager
+                
+                # Map interval for yfinance
+                yf_interval = interval
+                if interval == "15m":
+                    yf_interval = "15m"
+                    period = "5d"
+                elif interval == "30m":
+                    yf_interval = "30m"
+                    period = "10d"
+                elif interval == "1h":
+                    yf_interval = "1h"
+                    period = "30d"
+                else:  # 1d
+                    yf_interval = "1d"
+                    period = "90d"
+                
+                # Get the symbol (remove .NS if present)
+                chart_symbol = symbol
+                if chart_type == "Live Index":
+                    if symbol == "NIFTY 50":
+                        chart_symbol = "^NSEI"
+                    else:  # BANK NIFTY
+                        chart_symbol = "^NSEBANK"
+                elif '.' not in chart_symbol:
+                    chart_symbol = f"{chart_symbol}.NS"
+                
+                # Fetch data
+                df = data_manager.get_stock_data(chart_symbol, interval, use_kite=False)
+                
+                if df is not None and not df.empty and len(df) > 10:
+                    # Display basic info
+                    current_price = df['Close'].iloc[-1]
+                    prev_price = df['Close'].iloc[-2] if len(df) > 1 else current_price
+                    change_pct = ((current_price - prev_price) / prev_price * 100)
                     
-                    if mtf_data and "15m" in mtf_data:
-                        df = mtf_data["15m"]
-                        
-                        if PLOTLY_AVAILABLE:
-                            # Create advanced SMC chart
-                            fig = go.Figure()
-                            
-                            # Candlestick
-                            fig.add_trace(go.Candlestick(
-                                x=df.index,
-                                open=df['Open'],
-                                high=df['High'],
-                                low=df['Low'],
-                                close=df['Close'],
-                                name='Price',
-                                increasing_line_color='#10b981',
-                                decreasing_line_color='#ef4444'
-                            ))
-                            
-                            # Add SMC levels
-                            if show_smc and 'Support' in df.columns and 'Resistance' in df.columns:
-                                fig.add_trace(go.Scatter(
-                                    x=df.index,
-                                    y=df['Support'],
-                                    mode='lines',
-                                    name='Support',
-                                    line=dict(color='#10b981', width=1, dash='dash')
-                                ))
-                                
-                                fig.add_trace(go.Scatter(
-                                    x=df.index,
-                                    y=df['Resistance'],
-                                    mode='lines',
-                                    name='Resistance',
-                                    line=dict(color='#ef4444', width=1, dash='dash')
-                                ))
-                            
-                            # Add Volume Profile
-                            if show_volume and 'Volume_POC' in df.columns:
-                                fig.add_trace(go.Scatter(
-                                    x=df.index,
-                                    y=df['Volume_POC'],
-                                    mode='lines',
-                                    name='Volume POC',
-                                    line=dict(color='#8b5cf6', width=2)
-                                ))
-                            
-                            # Add indicators
-                            if show_indicators:
-                                if 'EMA8' in df.columns:
-                                    fig.add_trace(go.Scatter(
-                                        x=df.index,
-                                        y=df['EMA8'],
-                                        mode='lines',
-                                        name='EMA 8',
-                                        line=dict(color='#f59e0b', width=1)
-                                    ))
-                                
-                                if 'VWAP' in df.columns:
-                                    fig.add_trace(go.Scatter(
-                                        x=df.index,
-                                        y=df['VWAP'],
-                                        mode='lines',
-                                        name='VWAP',
-                                        line=dict(color='#3b82f6', width=1)
-                                    ))
-                            
-                            fig.update_layout(
-                                title=f"{stock} - SMC Analysis ({interval})",
-                                xaxis_title='Time',
-                                yaxis_title='Price (₹)',
-                                height=600,
-                                template='plotly_dark' if chart_theme == "Dark" else 'plotly_white',
-                                showlegend=True,
-                                hovermode='x unified'
-                            )
-                            
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Show SMC analysis
-                            st.subheader("SMC Analysis")
-                            col1, col2, col3, col4 = st.columns(4)
-                            
-                            with col1:
-                                bos = df['SMC_BOS'].iloc[-1] if 'SMC_BOS' in df.columns else 'NONE'
-                                st.metric("Break of Structure", bos)
-                            
-                            with col2:
-                                fvg = df['SMC_FVG'].iloc[-1] if 'SMC_FVG' in df.columns else 'NONE'
-                                st.metric("Fair Value Gap", fvg)
-                            
-                            with col3:
-                                ob = df['SMC_OB'].iloc[-1] if 'SMC_OB' in df.columns else 'NONE'
-                                st.metric("Order Block", ob)
-                            
-                            with col4:
-                                liq = df['SMC_Liquidity'].iloc[-1] if 'SMC_Liquidity' in df.columns else 'NONE'
-                                st.metric("Liquidity Grab", liq)
-                            
-                            # Market regime
-                            regime = df['Market_Regime'].iloc[-1] if 'Market_Regime' in df.columns else 'UNKNOWN'
-                            if regime == 'TREND':
-                                st.markdown('<div class="alert-success"><strong>Market Regime: TREND</strong><br>Favorable for SMC strategies</div>', unsafe_allow_html=True)
-                            elif regime == 'RANGE':
-                                st.markdown('<div class="alert-warning"><strong>Market Regime: RANGE</strong><br>Exercise caution with SMC</div>', unsafe_allow_html=True)
-                            else:
-                                st.markdown('<div class="alert-danger"><strong>Market Regime: VOLATILE</strong><br>High risk for SMC</div>', unsafe_allow_html=True)
-                    else:
-                        st.error("No data available for SMC analysis")
+                    cols = st.columns(4)
+                    cols[0].metric("Current Price", f"₹{current_price:,.2f}", f"{change_pct:+.2f}%")
+                    cols[1].metric("Today's High", f"₹{df['High'].iloc[-1]:,.2f}")
+                    cols[2].metric("Today's Low", f"₹{df['Low'].iloc[-1]:,.2f}")
+                    cols[3].metric("Volume", f"{df['Volume'].iloc[-1]:,.0f}")
                     
-                else:
-                    # Regular chart
-                    if chart_type == "Live Index":
-                        token = TradingConstants.KITE_TOKEN_MAP.get(index)
-                        if token:
-                            df = st.session_state.kite_manager.get_historical_data(
-                                token, 
-                                interval.replace("m", "minute").replace("h", "hour"),
-                                days=7
-                            )
-                        else:
-                            st.error("Token not found for selected index")
-                            return
-                    elif chart_type == "Stock Charts":
-                        token = TradingConstants.KITE_TOKEN_MAP.get(stock)
-                        if token:
-                            df = st.session_state.kite_manager.get_historical_data(
-                                token,
-                                interval.replace("m", "minute").replace("h", "hour"),
-                                days=7
-                            )
-                        else:
-                            st.error("Token not found for selected stock")
-                            return
-                    else:
-                        token = TradingConstants.KITE_TOKEN_MAP.get(symbol)
-                        if token:
-                            df = st.session_state.kite_manager.get_historical_data(
-                                token,
-                                interval.replace("m", "minute").replace("h", "hour"),
-                                days=30
-                            )
-                        else:
-                            st.error("Token not found for selected symbol")
-                            return
-                    
-                    if df is None or df.empty:
-                        st.warning("No data received from Kite. Using fallback.")
-                        symbol_to_fetch = index if chart_type == "Live Index" else stock if chart_type == "Stock Charts" else symbol
-                        df = st.session_state.data_manager.get_stock_data(
-                            symbol_to_fetch, 
-                            interval,
-                            use_kite=False
-                        )
-                    
-                    if df is not None and not df.empty and PLOTLY_AVAILABLE:
-                        # Create candlestick chart
+                    # Create chart
+                    if PLOTLY_AVAILABLE and go is not None:
                         fig = go.Figure(data=[go.Candlestick(
-                            x=df.index,
-                            open=df['Open'],
-                            high=df['High'],
-                            low=df['Low'],
-                            close=df['Close'],
+                            x=df.index[-100:],  # Last 100 periods
+                            open=df['Open'].iloc[-100:],
+                            high=df['High'].iloc[-100:],
+                            low=df['Low'].iloc[-100:],
+                            close=df['Close'].iloc[-100:],
                             name='Price',
                             increasing_line_color='#10b981',
                             decreasing_line_color='#ef4444'
@@ -3195,54 +3065,79 @@ def render_kite_charts_tab():
                         df['SMA50'] = df['Close'].rolling(window=50).mean()
                         
                         fig.add_trace(go.Scatter(
-                            x=df.index,
-                            y=df['SMA20'],
+                            x=df.index[-100:],
+                            y=df['SMA20'].iloc[-100:],
                             mode='lines',
                             name='SMA 20',
-                            line=dict(color='#f59e0b', width=1)
+                            line=dict(color='orange', width=1)
                         ))
                         
                         fig.add_trace(go.Scatter(
-                            x=df.index,
-                            y=df['SMA50'],
+                            x=df.index[-100:],
+                            y=df['SMA50'].iloc[-100:],
                             mode='lines',
                             name='SMA 50',
-                            line=dict(color='#3b82f6', width=1)
+                            line=dict(color='blue', width=1)
                         ))
                         
-                        chart_title = f"{index if chart_type == 'Live Index' else stock if chart_type == 'Stock Charts' else symbol} ({interval})"
-                        if chart_type == "Live Index":
-                            chart_title += " - Kite Live"
-                        else:
-                            chart_title += " - Historical"
+                        # Add VWAP if available
+                        if 'VWAP' in df.columns:
+                            fig.add_trace(go.Scatter(
+                                x=df.index[-100:],
+                                y=df['VWAP'].iloc[-100:],
+                                mode='lines',
+                                name='VWAP',
+                                line=dict(color='purple', width=1, dash='dash')
+                            ))
                         
                         fig.update_layout(
-                            title=chart_title,
-                            xaxis_title='Time',
+                            title=f"{symbol} - {interval} Chart",
+                            xaxis_title='Date',
                             yaxis_title='Price (₹)',
                             height=500,
-                            template='plotly_dark' if chart_theme == "Dark" else 'plotly_white',
-                            showlegend=True
+                            template='plotly_dark',
+                            showlegend=True,
+                            xaxis_rangeslider_visible=False
                         )
                         
                         st.plotly_chart(fig, use_container_width=True)
                         
-                        # Show current stats
-                        if len(df) > 0:
-                            current_price = df['Close'].iloc[-1]
-                            prev_close = df['Close'].iloc[-2] if len(df) > 1 else current_price
-                            change_pct = ((current_price - prev_close) / prev_close) * 100
+                        # For SMC Analysis, show additional info
+                        if chart_type == "SMC Analysis":
+                            st.subheader("🧠 SMC Analysis")
                             
-                            cols = st.columns(4)
-                            cols[0].metric("Current", f"₹{current_price:,.2f}", f"{change_pct:+.2f}%")
-                            cols[1].metric("Open", f"₹{df['Open'].iloc[-1]:,.2f}")
-                            cols[2].metric("High", f"₹{df['High'].max():,.2f}")
-                            cols[3].metric("Low", f"₹{df['Low'].min():,.2f}")
+                            smc_cols = st.columns(4)
+                            
+                            # Calculate basic SMC signals
+                            smc = AdvancedSMC()
+                            bos = smc.detect_BOS(df)
+                            fvg = smc.detect_FVG(df)
+                            
+                            with smc_cols[0]:
+                                st.metric("Break of Structure", bos if bos else "NONE")
+                            with smc_cols[1]:
+                                st.metric("Fair Value Gap", "YES" if fvg else "NO")
+                            with smc_cols[2]:
+                                if 'RSI14' in df.columns:
+                                    rsi_val = df['RSI14'].iloc[-1]
+                                    st.metric("RSI", f"{rsi_val:.1f}")
+                            with smc_cols[3]:
+                                if 'Volume_POC' in df.columns:
+                                    st.metric("Volume POC", f"₹{df['Volume_POC'].iloc[-1]:.2f}")
+                    
                     else:
-                        st.error("No data available or Plotly not available")
+                        st.warning("Plotly not available for charting. Install with: pip install plotly")
                         
+                        # Fallback to simple line chart
+                        st.line_chart(df[['Close']].tail(100))
+                        
+                else:
+                    st.error(f"No data available for {symbol}. Please check the symbol or try a different interval.")
+                    
             except Exception as e:
                 st.error(f"Error loading chart: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
     
     # Live data status
     if st.session_state.kite_manager and st.session_state.kite_manager.ticker:
