@@ -922,44 +922,50 @@ class DataManager:
         self.smc = AdvancedSMC()
     
     def get_stock_data(self, symbol, interval="15m", use_kite=True):
-        """Get stock data from Kite or Yahoo Finance"""
-        cache_key = f"{symbol}_{interval}_{datetime.now().strftime('%Y%m%d_%H')}"
-        
-        # Check cache
-        if cache_key in self.price_cache:
-            cached_data, timestamp = self.price_cache[cache_key]
-            if (datetime.now() - timestamp).seconds < self.cache_timeout:
-                return cached_data
-        
-        try:
-            # Try Kite Connect first if available
-            if use_kite and self.kite_manager and self.kite_manager.is_authenticated:
-                token = TradingConstants.KITE_TOKEN_MAP.get(symbol)
-                if token:
-                    # Map interval to Kite interval
-                    kite_interval_map = {
-                        "1m": "minute",
-                        "5m": "5minute",
-                        "15m": "15minute",
-                        "30m": "30minute",
-                        "1h": "60minute"
-                    }
-                    
-                    kite_interval = kite_interval_map.get(interval, "15minute")
-                    df = self.kite_manager.get_historical_data(token, kite_interval, days=7)
-                    
-                    if df is not None and not df.empty:
-                        # Process Kite data
-                        df = self._process_kite_data(df)
-                        self.price_cache[cache_key] = (df.copy(), datetime.now())
-                        return df
+    """Get stock data from Kite or Yahoo Finance"""
+    cache_key = f"{symbol}_{interval}_{datetime.now().strftime('%Y%m%d_%H')}"
+    
+    # Check cache
+    if cache_key in self.price_cache:
+        cached_data, timestamp = self.price_cache[cache_key]
+        if (datetime.now() - timestamp).seconds < self.cache_timeout:
+            return cached_data
+    
+    try:
+        # Try Kite Connect first if available and authenticated
+        if use_kite and self.kite_manager and self.kite_manager.is_authenticated:
+            # Get token for the symbol
+            token = None
+            for key, value in TradingConstants.KITE_TOKEN_MAP.items():
+                if key in symbol or symbol.replace('.NS', '') in key:
+                    token = value
+                    break
             
-            # Fallback to Yahoo Finance
-            return self._get_yahoo_data(symbol, interval)
-            
-        except Exception as e:
-            logger.error(f"Error fetching data for {symbol}: {e}")
-            return self._get_yahoo_data(symbol, interval)  # Fallback
+            if token:
+                # Map interval to Kite interval
+                kite_interval_map = {
+                    "1m": "minute",
+                    "5m": "5minute",
+                    "15m": "15minute",
+                    "30m": "30minute",
+                    "1h": "60minute"
+                }
+                
+                kite_interval = kite_interval_map.get(interval, "15minute")
+                df = self.kite_manager.get_historical_data(token, kite_interval, days=7)
+                
+                if df is not None and not df.empty:
+                    # Process Kite data
+                    df = self._process_kite_data(df)
+                    self.price_cache[cache_key] = (df.copy(), datetime.now())
+                    return df
+        
+        # Fallback to Yahoo Finance
+        return self._get_yahoo_data(symbol, interval)
+        
+    except Exception as e:
+        logger.error(f"Error fetching data for {symbol}: {e}")
+        return self._get_yahoo_data(symbol, interval)  # Fallback
     
     def get_mtf_data(self, symbol, intervals=["15m", "1h", "1d"]):
         """Get Multi-TimeFrame data"""
@@ -2953,305 +2959,51 @@ def render_sidebar():
         st.divider()
         st.caption(f"v4.0 | {now_indian().strftime('%H:%M:%S')}")
 
-def render_kite_charts_tab():
-    """Render Kite Charts tab with live data"""
-    st.subheader("📈 Kite Connect Live Charts")
+def get_stock_data(self, symbol, interval="15m", use_kite=True):
+    """Get stock data from Kite or Yahoo Finance"""
+    cache_key = f"{symbol}_{interval}_{datetime.now().strftime('%Y%m%d_%H')}"
     
-    if not st.session_state.kite_authenticated or not st.session_state.kite_manager:
-        st.info("🔐 Please authenticate with Kite Connect in the sidebar to view live charts")
-        return
+    # Check cache
+    if cache_key in self.price_cache:
+        cached_data, timestamp = self.price_cache[cache_key]
+        if (datetime.now() - timestamp).seconds < self.cache_timeout:
+            return cached_data
     
-    st.success(f"✅ Authenticated as {st.session_state.kite_manager.user_name}")
-    
-    # Advanced chart options
-    with st.expander("Advanced Chart Settings"):
-        col1, col2 = st.columns(2)
-        with col1:
-            show_smc = st.checkbox("Show SMC Levels", value=True)
-            show_volume = st.checkbox("Show Volume Profile", value=True)
-        with col2:
-            show_indicators = st.checkbox("Show Indicators", value=True)
-            chart_theme = st.selectbox("Chart Theme", ["Dark", "Light"])
-    
-    # Chart selection
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        chart_type = st.selectbox(
-            "Chart Type",
-            ["Live Index", "Stock Charts", "Historical Data", "SMC Analysis"],
-            key="kite_chart_type"
-        )
-    
-    with col2:
-        if chart_type == "Live Index":
-            index = st.selectbox(
-                "Select Index",
-                ["NIFTY 50", "BANK NIFTY"],
-                key="kite_index_select"
-            )
-        elif chart_type == "Stock Charts":
-            stock = st.selectbox(
-                "Select Stock",
-                TradingConstants.NIFTY_50[:10],
-                key="kite_stock_select"
-            )
-        elif chart_type == "SMC Analysis":
-            stock = st.selectbox(
-                "Select Stock for SMC",
-                TradingConstants.NIFTY_50[:5],
-                key="kite_smc_select"
-            )
-        else:
-            symbol = st.selectbox(
-                "Select Symbol",
-                TradingConstants.NIFTY_50[:10],
-                key="kite_hist_select"
-            )
-    
-    with col3:
-        interval = st.selectbox(
-            "Interval",
-            ["1m", "5m", "15m", "30m", "1h"],
-            key="kite_interval"
-        )
-    
-    if st.button("📊 Load Chart", type="primary"):
-        with st.spinner("Fetching data..."):
-            try:
-                if chart_type == "SMC Analysis":
-                    # Get MTF data for SMC analysis
-                    mtf_data = st.session_state.data_manager.get_mtf_data(stock, intervals=["15m", "1h", "1d"])
-                    
-                    if mtf_data and "15m" in mtf_data:
-                        df = mtf_data["15m"]
-                        
-                        if PLOTLY_AVAILABLE:
-                            # Create advanced SMC chart
-                            fig = go.Figure()
-                            
-                            # Candlestick
-                            fig.add_trace(go.Candlestick(
-                                x=df.index,
-                                open=df['Open'],
-                                high=df['High'],
-                                low=df['Low'],
-                                close=df['Close'],
-                                name='Price',
-                                increasing_line_color='#10b981',
-                                decreasing_line_color='#ef4444'
-                            ))
-                            
-                            # Add SMC levels
-                            if show_smc and 'Support' in df.columns and 'Resistance' in df.columns:
-                                fig.add_trace(go.Scatter(
-                                    x=df.index,
-                                    y=df['Support'],
-                                    mode='lines',
-                                    name='Support',
-                                    line=dict(color='#10b981', width=1, dash='dash')
-                                ))
-                                
-                                fig.add_trace(go.Scatter(
-                                    x=df.index,
-                                    y=df['Resistance'],
-                                    mode='lines',
-                                    name='Resistance',
-                                    line=dict(color='#ef4444', width=1, dash='dash')
-                                ))
-                            
-                            # Add Volume Profile
-                            if show_volume and 'Volume_POC' in df.columns:
-                                fig.add_trace(go.Scatter(
-                                    x=df.index,
-                                    y=df['Volume_POC'],
-                                    mode='lines',
-                                    name='Volume POC',
-                                    line=dict(color='#8b5cf6', width=2)
-                                ))
-                            
-                            # Add indicators
-                            if show_indicators:
-                                if 'EMA8' in df.columns:
-                                    fig.add_trace(go.Scatter(
-                                        x=df.index,
-                                        y=df['EMA8'],
-                                        mode='lines',
-                                        name='EMA 8',
-                                        line=dict(color='#f59e0b', width=1)
-                                    ))
-                                
-                                if 'VWAP' in df.columns:
-                                    fig.add_trace(go.Scatter(
-                                        x=df.index,
-                                        y=df['VWAP'],
-                                        mode='lines',
-                                        name='VWAP',
-                                        line=dict(color='#3b82f6', width=1)
-                                    ))
-                            
-                            fig.update_layout(
-                                title=f"{stock} - SMC Analysis ({interval})",
-                                xaxis_title='Time',
-                                yaxis_title='Price (₹)',
-                                height=600,
-                                template='plotly_dark' if chart_theme == "Dark" else 'plotly_white',
-                                showlegend=True,
-                                hovermode='x unified'
-                            )
-                            
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Show SMC analysis
-                            st.subheader("SMC Analysis")
-                            col1, col2, col3, col4 = st.columns(4)
-                            
-                            with col1:
-                                bos = df['SMC_BOS'].iloc[-1] if 'SMC_BOS' in df.columns else 'NONE'
-                                st.metric("Break of Structure", bos)
-                            
-                            with col2:
-                                fvg = df['SMC_FVG'].iloc[-1] if 'SMC_FVG' in df.columns else 'NONE'
-                                st.metric("Fair Value Gap", fvg)
-                            
-                            with col3:
-                                ob = df['SMC_OB'].iloc[-1] if 'SMC_OB' in df.columns else 'NONE'
-                                st.metric("Order Block", ob)
-                            
-                            with col4:
-                                liq = df['SMC_Liquidity'].iloc[-1] if 'SMC_Liquidity' in df.columns else 'NONE'
-                                st.metric("Liquidity Grab", liq)
-                            
-                            # Market regime
-                            regime = df['Market_Regime'].iloc[-1] if 'Market_Regime' in df.columns else 'UNKNOWN'
-                            if regime == 'TREND':
-                                st.markdown('<div class="alert-success"><strong>Market Regime: TREND</strong><br>Favorable for SMC strategies</div>', unsafe_allow_html=True)
-                            elif regime == 'RANGE':
-                                st.markdown('<div class="alert-warning"><strong>Market Regime: RANGE</strong><br>Exercise caution with SMC</div>', unsafe_allow_html=True)
-                            else:
-                                st.markdown('<div class="alert-danger"><strong>Market Regime: VOLATILE</strong><br>High risk for SMC</div>', unsafe_allow_html=True)
-                    else:
-                        st.error("No data available for SMC analysis")
-                    
-                else:
-                    # Regular chart
-                    if chart_type == "Live Index":
-                        token = TradingConstants.KITE_TOKEN_MAP.get(index)
-                        if token:
-                            df = st.session_state.kite_manager.get_historical_data(
-                                token, 
-                                interval.replace("m", "minute").replace("h", "hour"),
-                                days=7
-                            )
-                        else:
-                            st.error("Token not found for selected index")
-                            return
-                    elif chart_type == "Stock Charts":
-                        token = TradingConstants.KITE_TOKEN_MAP.get(stock)
-                        if token:
-                            df = st.session_state.kite_manager.get_historical_data(
-                                token,
-                                interval.replace("m", "minute").replace("h", "hour"),
-                                days=7
-                            )
-                        else:
-                            st.error("Token not found for selected stock")
-                            return
-                    else:
-                        token = TradingConstants.KITE_TOKEN_MAP.get(symbol)
-                        if token:
-                            df = st.session_state.kite_manager.get_historical_data(
-                                token,
-                                interval.replace("m", "minute").replace("h", "hour"),
-                                days=30
-                            )
-                        else:
-                            st.error("Token not found for selected symbol")
-                            return
-                    
-                    if df is None or df.empty:
-                        st.warning("No data received from Kite. Using fallback.")
-                        symbol_to_fetch = index if chart_type == "Live Index" else stock if chart_type == "Stock Charts" else symbol
-                        df = st.session_state.data_manager.get_stock_data(
-                            symbol_to_fetch, 
-                            interval,
-                            use_kite=False
-                        )
-                    
-                    if df is not None and not df.empty and PLOTLY_AVAILABLE:
-                        # Create candlestick chart
-                        fig = go.Figure(data=[go.Candlestick(
-                            x=df.index,
-                            open=df['Open'],
-                            high=df['High'],
-                            low=df['Low'],
-                            close=df['Close'],
-                            name='Price',
-                            increasing_line_color='#10b981',
-                            decreasing_line_color='#ef4444'
-                        )])
-                        
-                        # Add moving averages
-                        df['SMA20'] = df['Close'].rolling(window=20).mean()
-                        df['SMA50'] = df['Close'].rolling(window=50).mean()
-                        
-                        fig.add_trace(go.Scatter(
-                            x=df.index,
-                            y=df['SMA20'],
-                            mode='lines',
-                            name='SMA 20',
-                            line=dict(color='#f59e0b', width=1)
-                        ))
-                        
-                        fig.add_trace(go.Scatter(
-                            x=df.index,
-                            y=df['SMA50'],
-                            mode='lines',
-                            name='SMA 50',
-                            line=dict(color='#3b82f6', width=1)
-                        ))
-                        
-                        chart_title = f"{index if chart_type == 'Live Index' else stock if chart_type == 'Stock Charts' else symbol} ({interval})"
-                        if chart_type == "Live Index":
-                            chart_title += " - Kite Live"
-                        else:
-                            chart_title += " - Historical"
-                        
-                        fig.update_layout(
-                            title=chart_title,
-                            xaxis_title='Time',
-                            yaxis_title='Price (₹)',
-                            height=500,
-                            template='plotly_dark' if chart_theme == "Dark" else 'plotly_white',
-                            showlegend=True
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Show current stats
-                        if len(df) > 0:
-                            current_price = df['Close'].iloc[-1]
-                            prev_close = df['Close'].iloc[-2] if len(df) > 1 else current_price
-                            change_pct = ((current_price - prev_close) / prev_close) * 100
-                            
-                            cols = st.columns(4)
-                            cols[0].metric("Current", f"₹{current_price:,.2f}", f"{change_pct:+.2f}%")
-                            cols[1].metric("Open", f"₹{df['Open'].iloc[-1]:,.2f}")
-                            cols[2].metric("High", f"₹{df['High'].max():,.2f}")
-                            cols[3].metric("Low", f"₹{df['Low'].min():,.2f}")
-                    else:
-                        st.error("No data available or Plotly not available")
-                        
-            except Exception as e:
-                st.error(f"Error loading chart: {str(e)}")
-    
-    # Live data status
-    if st.session_state.kite_manager and st.session_state.kite_manager.ticker:
-        st.markdown("""
-        <div class="alert-success">
-            <strong>✅ Live Data Connected</strong><br>
-            Real-time WebSocket data streaming from Kite
-        </div>
-        """, unsafe_allow_html=True)
+    try:
+        # Try Kite Connect first if available and authenticated
+        if use_kite and self.kite_manager and self.kite_manager.is_authenticated:
+            # Get token for the symbol
+            token = None
+            for key, value in TradingConstants.KITE_TOKEN_MAP.items():
+                if key in symbol or symbol.replace('.NS', '') in key:
+                    token = value
+                    break
+            
+            if token:
+                # Map interval to Kite interval
+                kite_interval_map = {
+                    "1m": "minute",
+                    "5m": "5minute",
+                    "15m": "15minute",
+                    "30m": "30minute",
+                    "1h": "60minute"
+                }
+                
+                kite_interval = kite_interval_map.get(interval, "15minute")
+                df = self.kite_manager.get_historical_data(token, kite_interval, days=7)
+                
+                if df is not None and not df.empty:
+                    # Process Kite data
+                    df = self._process_kite_data(df)
+                    self.price_cache[cache_key] = (df.copy(), datetime.now())
+                    return df
+        
+        # Fallback to Yahoo Finance
+        return self._get_yahoo_data(symbol, interval)
+        
+    except Exception as e:
+        logger.error(f"Error fetching data for {symbol}: {e}")
+        return self._get_yahoo_data(symbol, interval)  # Fallback
         
         # Start live data for NIFTY 50
         if st.button("▶️ Start Live Feed"):
